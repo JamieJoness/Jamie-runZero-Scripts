@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
 Deletes all runZero assets that match the inventory query:
-(type:phone OR type:mobile OR type:printer OR os:Neat OR os:Aruba)
+type:mobile
 
 Safety checks:
 - Only deletes asset IDs returned by the search query above.
-- Also verifies each returned record is one of:
-  - type == Mobile, Phone, or Printer (so IP Phone will NOT be deleted)
-  - OR os contains "Neat" or "Aruba" (case-insensitive)
+- Also verifies each returned record has type == Mobile.
 
 You must set TOKEN (and optionally ORG_ID / BASE_URL) below.
 """
 
+import csv
 import json
+import os
 import sys
 import time
+from collections import Counter
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
 import requests
@@ -24,19 +26,21 @@ import requests
 # CONFIG (EDIT THESE)
 # ----------------------------
 BASE_URL = "https://console-eu.runzero.com/api/v1.0"  # change if self-hosted
-TOKEN = "API KEY"  # Organisations > Settings > Generate Organisation API Key
+TOKEN = "API KEY"  # Organisations > Settings > Generate Organisation API Key — or set RUNZERO_TOKEN env var
 ORG_ID = ""  # optional: org UUID (only needed for account-scoped tokens, leave blank if using an ORGANISATION TOKEN)
+
+# Strip any accidental trailing slash so URL construction is always clean
+BASE_URL = BASE_URL.rstrip("/")
 
 
 # Delete assets matching this query
-DELETE_QUERY = "(type:phone OR type:mobile OR type:printer OR os:Neat OR os:Aruba)"
+DELETE_QUERY = "type:mobile"
 
-# Extra safety checks on returned records:
-# - Types must be exactly these (prevents deleting "IP Phone")
-ALLOWED_TYPES = {"mobile", "phone", "printer"}
+# Extra safety check: only delete assets whose type is exactly one of these
+ALLOWED_TYPES = {"mobile"}
 
-# - Or OS must contain one of these strings (case-insensitive)
-ALLOWED_OS_SUBSTRINGS = {"neat", "aruba"}
+# No OS-based matching needed for this query
+ALLOWED_OS_SUBSTRINGS: set = set()
 
 BATCH_SIZE = 500
 TIMEOUT_SECONDS = 60
@@ -45,10 +49,12 @@ TABLE_MAX_ROWS = 50   # max rows shown in the dry-run table before truncating
 COL_MAX_WIDTH  = 40   # max characters per column value before truncating with …
 
 
+# Shortens a string to fit within a column, adding … if truncated
 def _trunc(s: str, width: int) -> str:
     return s if len(s) <= width else s[: width - 1] + "\u2026"
 
 
+# Creates a reusable HTTP session with the API token set in the headers
 def build_session(token: str) -> requests.Session:
     s = requests.Session()
     s.headers.update(
@@ -61,6 +67,8 @@ def build_session(token: str) -> requests.Session:
     return s
 
 
+# Sends an HTTP request and automatically retries on network errors or
+# server-side failures (429 rate limit, 5xx errors) with exponential backoff
 def request_with_retries(
     session: requests.Session,
     method: str,
@@ -91,6 +99,7 @@ def request_with_retries(
         if resp.status_code in (429, 500, 502, 503, 504):
             if attempt == MAX_RETRIES:
                 return resp
+            # Respect the server's Retry-After header if present, otherwise use backoff
             retry_after = resp.headers.get("Retry-After")
             if retry_after:
                 try:
@@ -107,6 +116,7 @@ def request_with_retries(
     return resp  # defensive
 
 
+# Parses the streaming JSONL response line by line, yielding each asset as a dict
 def iter_assets_jsonl(resp: requests.Response) -> Iterable[Dict]:
     resp.raise_for_status()
     for line in resp.iter_lines(decode_unicode=True):
@@ -121,6 +131,9 @@ def iter_assets_jsonl(resp: requests.Response) -> Iterable[Dict]:
             continue
 
 
+# Queries the runZero export API using DELETE_QUERY, then applies a secondary
+# safety check to ensure only assets matching ALLOWED_TYPES (or ALLOWED_OS_SUBSTRINGS)
+# are included. Returns a list of asset dicts ready for display and deletion.
 def fetch_deletable_assets(session: requests.Session) -> List[Dict]:
     url = f"{BASE_URL}/export/org/assets.jsonl"
     params: Dict[str, str] = {"search": DELETE_QUERY, "fields": "id,type,os,names,addresses"}
@@ -139,6 +152,7 @@ def fetch_deletable_assets(session: requests.Session) -> List[Dict]:
         asset_type = (obj.get("type") or "").strip().lower()
         asset_os = (obj.get("os") or "").strip().lower()
 
+        # Safety check: confirm the asset matches our allowed criteria before queuing for deletion
         type_ok = asset_type in ALLOWED_TYPES
         os_ok = any(s in asset_os for s in ALLOWED_OS_SUBSTRINGS)
 
@@ -162,11 +176,13 @@ def fetch_deletable_assets(session: requests.Session) -> List[Dict]:
     return assets
 
 
+# Splits a list into smaller batches of a given size for bulk API calls
 def chunked(seq: List[str], size: int) -> Iterable[List[str]]:
     for i in range(0, len(seq), size):
         yield seq[i : i + size]
 
 
+# Sends a bulk delete request to the runZero API for a batch of asset IDs
 def bulk_delete_assets(session: requests.Session, asset_ids: List[str]) -> requests.Response:
     url = f"{BASE_URL}/org/assets/bulk/delete"
     params: Dict[str, str] = {}
@@ -176,10 +192,12 @@ def bulk_delete_assets(session: requests.Session, asset_ids: List[str]) -> reque
     return request_with_retries(session, "POST", url, params=params, json_body=body, stream=False)
 
 
+# Prints a formatted table of assets that would be deleted, capped at TABLE_MAX_ROWS
 def print_dry_run_table(assets: List[Dict]) -> None:
     display = assets[:TABLE_MAX_ROWS]
     truncated = len(assets) - len(display)
 
+    # Calculate column widths based on content, capped at COL_MAX_WIDTH
     def w(key: str) -> int:
         header_len = len(key.title())
         return min(COL_MAX_WIDTH, max(header_len, max((len(a[key]) for a in display), default=0)))
@@ -213,8 +231,19 @@ def print_dry_run_table(assets: List[Dict]) -> None:
         print(f"  ... and {truncated} more (showing first {TABLE_MAX_ROWS} of {len(assets)})")
 
 
+# Writes a CSV audit log of deleted assets with a timestamp in the filename
+def write_audit_log(assets: List[Dict]) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"runzero_deleted_{timestamp}.csv"
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["id", "name", "address", "type", "os"])
+        writer.writeheader()
+        writer.writerows(assets)
+    return filename
+
+
+# Prints a count of assets grouped by type/OS category
 def print_type_summary(assets: List[Dict]) -> None:
-    from collections import Counter
     counts: Counter = Counter()
     for a in assets:
         t = a["type"].lower()
@@ -230,17 +259,23 @@ def print_type_summary(assets: List[Dict]) -> None:
 
 
 def main() -> int:
-    if not TOKEN or TOKEN == "API KEY":
-        print("ERROR: Set TOKEN at the top of the script before running.", file=sys.stderr)
+    # Prefer the environment variable so the token doesn't need to be hardcoded in the script
+    token = os.environ.get("RUNZERO_TOKEN") or TOKEN
+    if not token or token == "API KEY":
+        print(
+            "ERROR: Set TOKEN at the top of the script or export RUNZERO_TOKEN=<your token>.",
+            file=sys.stderr,
+        )
         return 2
 
-    session = build_session(TOKEN)
+    session = build_session(token)
 
     print(f"Base URL: {BASE_URL}")
     if ORG_ID:
         print(f"Org ID (_oid): {ORG_ID}")
     print(f"Query: {DELETE_QUERY}")
 
+    # Fetch all assets matching the query (read-only, nothing is deleted yet)
     print("\nFetching matching assets (dry run)...")
     try:
         assets = fetch_deletable_assets(session)
@@ -252,6 +287,7 @@ def main() -> int:
         print("No matching assets found. Nothing to delete.")
         return 0
 
+    # Show the user exactly what would be deleted and ask for confirmation
     print(f"\nDRY RUN — {len(assets)} asset(s) would be deleted:\n")
     print_dry_run_table(assets)
     print()
@@ -268,6 +304,7 @@ def main() -> int:
         print("Aborted. No assets were deleted.")
         return 0
 
+    # Delete assets in batches and report progress
     ids = [a["id"] for a in assets]
     deleted = 0
     total = len(ids)
@@ -292,7 +329,10 @@ def main() -> int:
         print(f"\nInterrupted. {deleted}/{total} asset(s) deleted before interruption.")
         return 130
 
+    # Write an audit log CSV of everything that was deleted
+    log_file = write_audit_log(assets)
     print(f"\nDone. {deleted} asset(s) deleted.")
+    print(f"Audit log written to: {log_file}")
     return 0
 
 
