@@ -20,7 +20,7 @@ import requests
 # CONFIG (EDIT THESE)
 # ----------------------------
 BASE_URL = "https://console-eu.runzero.com/api/v1.0"  # change if self-hosted
-TOKEN = "OT603EDA2736014C4A7B38D118ADD9" # Get this API key by going into Organisations > Settings on your organisation > Generate Organisation API Key
+TOKEN = "API KEY" # Get this API key by going into Organisations > Settings on your organisation > Generate Organisation API Key
 ORG_ID = ""  # optional: org UUID (only needed for account-scoped tokens, leave blank if using an ORGANISATION TOKEN 
 
 
