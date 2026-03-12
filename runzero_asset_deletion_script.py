@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Deletes all runZero assets that match the inventory query:
-type:mobile
+hardware:cisco OR type:mobile
 
 Safety checks:
 - Only deletes asset IDs returned by the search query above.
-- Also verifies each returned record has type == Mobile.
+- Also verifies each returned record has hardware containing "cisco" or type == Mobile.
 
 You must set TOKEN (and optionally ORG_ID / BASE_URL) below.
 """
@@ -34,10 +34,13 @@ BASE_URL = BASE_URL.rstrip("/")
 
 
 # Delete assets matching this query
-DELETE_QUERY = "type:mobile"
+DELETE_QUERY = "hardware:cisco OR type:mobile"
 
 # Extra safety check: only delete assets whose type is exactly one of these
 ALLOWED_TYPES = {"mobile"}
+
+# Extra safety check: only delete assets whose hardware contains one of these substrings
+ALLOWED_HARDWARE_SUBSTRINGS = {"cisco"}
 
 # No OS-based matching needed for this query
 ALLOWED_OS_SUBSTRINGS: set = set()
@@ -136,7 +139,7 @@ def iter_assets_jsonl(resp: requests.Response) -> Iterable[Dict]:
 # are included. Returns a list of asset dicts ready for display and deletion.
 def fetch_deletable_assets(session: requests.Session) -> List[Dict]:
     url = f"{BASE_URL}/export/org/assets.jsonl"
-    params: Dict[str, str] = {"search": DELETE_QUERY, "fields": "id,type,os,names,addresses"}
+    params: Dict[str, str] = {"search": DELETE_QUERY, "fields": "id,type,os,hw,names,addresses"}
     if ORG_ID:
         params["_oid"] = ORG_ID
 
@@ -151,12 +154,14 @@ def fetch_deletable_assets(session: requests.Session) -> List[Dict]:
 
         asset_type = (obj.get("type") or "").strip().lower()
         asset_os = (obj.get("os") or "").strip().lower()
+        asset_hw = (obj.get("hw") or "").strip().lower()
 
         # Safety check: confirm the asset matches our allowed criteria before queuing for deletion
         type_ok = asset_type in ALLOWED_TYPES
         os_ok = any(s in asset_os for s in ALLOWED_OS_SUBSTRINGS)
+        hw_ok = any(s in asset_hw for s in ALLOWED_HARDWARE_SUBSTRINGS)
 
-        if type_ok or os_ok:
+        if type_ok or os_ok or hw_ok:
             raw_names = obj.get("names")
             raw_addrs = obj.get("addresses")
             name    = (raw_names[0] if isinstance(raw_names, list) else raw_names) or "(unknown)"
@@ -165,6 +170,7 @@ def fetch_deletable_assets(session: requests.Session) -> List[Dict]:
                 "id":      asset_id,
                 "type":    obj.get("type") or "",
                 "os":      obj.get("os") or "",
+                "hw":      obj.get("hw") or "",
                 "name":    name,
                 "address": address,
             })
@@ -207,13 +213,15 @@ def print_dry_run_table(assets: List[Dict]) -> None:
         "address": w("address"),
         "type":    w("type"),
         "os":      w("os"),
+        "hw":      w("hw"),
     }
     sep = "  "
     header = (
         f"{'Name':<{col_widths['name']}}{sep}"
         f"{'Address':<{col_widths['address']}}{sep}"
         f"{'Type':<{col_widths['type']}}{sep}"
-        f"{'OS':<{col_widths['os']}}"
+        f"{'OS':<{col_widths['os']}}{sep}"
+        f"{'HW':<{col_widths['hw']}}"
     )
     divider = "-" * len(header)
     print(divider)
@@ -224,7 +232,8 @@ def print_dry_run_table(assets: List[Dict]) -> None:
             f"{_trunc(a['name'],    col_widths['name'])   :<{col_widths['name']}}{sep}"
             f"{_trunc(a['address'], col_widths['address']):<{col_widths['address']}}{sep}"
             f"{_trunc(a['type'],    col_widths['type'])   :<{col_widths['type']}}{sep}"
-            f"{_trunc(a['os'],      col_widths['os'])     :<{col_widths['os']}}"
+            f"{_trunc(a['os'],      col_widths['os'])     :<{col_widths['os']}}{sep}"
+            f"{_trunc(a['hw'],      col_widths['hw'])     :<{col_widths['hw']}}"
         )
     print(divider)
     if truncated:
@@ -236,7 +245,7 @@ def write_audit_log(assets: List[Dict]) -> str:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"runzero_deleted_{timestamp}.csv"
     with open(filename, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["id", "name", "address", "type", "os"])
+        writer = csv.DictWriter(f, fieldnames=["id", "name", "address", "type", "os", "hw"])
         writer.writeheader()
         writer.writerows(assets)
     return filename
@@ -249,6 +258,8 @@ def print_type_summary(assets: List[Dict]) -> None:
         t = a["type"].lower()
         if t in ALLOWED_TYPES:
             counts[a["type"] or "Unknown"] += 1
+        elif any(s in a["hw"].lower() for s in ALLOWED_HARDWARE_SUBSTRINGS):
+            counts[f"HW:Cisco"] += 1
         else:
             for sub in ALLOWED_OS_SUBSTRINGS:
                 if sub in a["os"].lower():
