@@ -43,7 +43,17 @@ def millis_to_utc(ms):
         days -= mdays[i]
 
     day = days + 1
-    return "%02d-%02d-%04d %02d:%02d:%02d UTC" % (day, month, year, hours, minutes, seconds)
+
+    def pad2(n):
+        if n < 10:
+            return "0" + str(n)
+        return str(n)
+
+    def pad4(n):
+        s = str(n)
+        return "0" * (4 - len(s)) + s if len(s) < 4 else s
+
+    return pad2(day) + "-" + pad2(month) + "-" + pad4(year) + " " + pad2(hours) + ":" + pad2(minutes) + ":" + pad2(seconds) + " UTC"
 
 def build_network_interfaces(device):
     ip_field = device.get('ip_address') or ''
