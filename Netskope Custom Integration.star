@@ -4,7 +4,7 @@ load('net', 'ip_address')
 load('http', http_get='get', 'url_encode')
 load('uuid', 'new_uuid')
 
-NETSKOPE_API_URL = 'https://salvadorcaetano.goskope.com/api'
+NETSKOPE_API_URL = 'https://<your-tenant>.goskope.com/api'
 NETSKOPE_API_GROUPBYS = 'nsdeviceuid'
 
 # Add any additional Netskope fields you want returned via the "fields=" param here.
