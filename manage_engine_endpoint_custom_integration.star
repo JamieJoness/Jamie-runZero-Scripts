@@ -87,7 +87,9 @@ def build_assets(devices):
             if k in ('resource_id','id','resource_name','ip_address','mac_address'):
                 continue
             if is_millis_timestamp(v):
-                custom[k] = millis_to_utc(v)
+                # Keep original Unix millis for queryability and add readable UTC companion.
+                custom[k] = str(v)[:1023]
+                custom[k + 'StandardTime'] = millis_to_utc(v)[:1023]
             else:
                 custom[k] = str(v)[:1023]
 
