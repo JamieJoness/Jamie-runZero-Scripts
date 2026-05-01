@@ -1,7 +1,7 @@
 load('json', json_encode='encode', json_decode='decode')
 load('http', http_get='get', http_patch='patch')
 
-# Vulnerability Remediation Priority Tagger — runZero Custom Integration
+# Vulnerability Remediation Priority Tagger
 #
 # Reads assets tagged with vuln_tier: (1-4) and their vulnerabilities,
 # then writes a remediation_priority tag (P1-P5) per the priority matrix:
@@ -12,7 +12,7 @@ load('http', http_get='get', http_patch='patch')
 #   Tier 3 + Critical/High/Medium + KEV  → P3
 #   Tier 2 + Critical/High/Medium        → P3
 #   Tier 4 + Critical/High/Medium + KEV  → P4
-#   Any    + Critical/High/Medium/Low    → P5
+#   Any    + Low    → P5
 #   Info-only vulns receive no tag.
 #
 # Each asset keeps only its highest (lowest number) priority.
@@ -25,7 +25,7 @@ TAG_BATCH_SIZE = 50
 
 PRIORITY_LOOKUP = {
     '1,True': 'P1',
-    '2,True': 'P2',h
+    '2,True': 'P2',
     '1,False': 'P2',
     '3,True': 'P3',
     '2,False': 'P3',
@@ -145,7 +145,7 @@ def determine_priority(tier, severity, has_kev):
         if result:
             return result
 
-    if severity in P5_SEVERITIES and not has_kev:
+    if severity in P5_SEVERITIES:
         return 'P5'
 
     return None
@@ -297,6 +297,23 @@ def main(*args, **kwargs):
         print('No vulnerabilities found.')
         return None
 
+    # Step 2b: Build KEV lookup by asset ID from a separate filtered export
+    # The vuln export does not include KEV fields, so we query with kev:true
+    # and collect asset IDs that have at least one KEV vulnerability.
+    print('  Fetching KEV vulnerability list...')
+    kev_vulns = paginated_export(headers, base_url, 'vulnerabilities.json', 'kev:true')
+    print('  KEV export returned {} vuln records.'.format(len(kev_vulns)))
+    kev_asset_ids = {}
+    for kv in kev_vulns:
+        aid = kv.get('vulnerability_asset_id')
+        if aid == None or str(aid).strip() == '':
+            aid = kv.get('asset_id')
+        if aid != None and str(aid).strip() != '':
+            kev_asset_ids[str(aid).strip()] = True
+    print('  {} unique assets with KEV vulns.'.format(len(kev_asset_ids)))
+    if len(kev_asset_ids) == 0:
+        print('  WARNING: No KEV assets found. KEV-based priority escalation will not work.')
+
     # Detect field name convention
     asset_id_field = 'asset_id'
     if len(vulns) > 0:
@@ -320,7 +337,9 @@ def main(*args, **kwargs):
             continue
 
         severity = classify_severity(vuln)
-        has_kev = check_kev(vuln)
+        has_kev = False
+        if asset_id != None and str(asset_id).strip() != '':
+            has_kev = str(asset_id).strip() in kev_asset_ids
         priority = determine_priority(tier, severity, has_kev)
         if priority == None:
             continue
