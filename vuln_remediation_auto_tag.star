@@ -25,7 +25,7 @@ TAG_BATCH_SIZE = 50
 
 PRIORITY_LOOKUP = {
     '1,True': 'P1',
-    '2,True': 'P2',
+    '2,True': 'P2',h
     '1,False': 'P2',
     '3,True': 'P3',
     '2,False': 'P3',
