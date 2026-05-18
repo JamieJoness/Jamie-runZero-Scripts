@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Migrates scan task data from one runZero organisation to another.
+Migrates scan task data between organisations on the same self hosted runZero console.
 
 Steps:
-  1. Connects to the source org and fetches the N most-recent processed scan tasks.
+  1. Connects to the source org and fetches the N most recent processed scan tasks.
   2. Downloads the gzipped scan data for each task.
   3. Uploads each scan file to the target org so it can be reprocessed in the UI.
 
-Set SOURCE_TOKEN, TARGET_TOKEN, and TASK_LIMIT below before running.
+Set CONSOLE_BASE_URL, SOURCE_TOKEN, and TARGET_TOKEN below before running.
 """
 
 import os
@@ -21,41 +21,36 @@ import requests
 
 
 # ============================================================
-# SOURCE ORG CONFIG
+# CONFIGURATION — edit the values below before running
 # ============================================================
-SOURCE_BASE_URL = "https://console.runzero.com/api/v1.0"  # change if EU or self-hosted
-SOURCE_TOKEN    = "PASTE_SOURCE_ORG_API_KEY_HERE"          # Organisations > Settings > Generate Organisation API Key
-SOURCE_ORG_ID   = ""                                       # optional: leave blank for org-scoped tokens
-
-SOURCE_BASE_URL = os.environ.get("RUNZERO_SOURCE_BASE_URL", SOURCE_BASE_URL).rstrip("/")
-SOURCE_TOKEN    = os.environ.get("RUNZERO_SOURCE_TOKEN",    SOURCE_TOKEN)
-SOURCE_ORG_ID   = os.environ.get("RUNZERO_SOURCE_ORG_ID",  SOURCE_ORG_ID)
-
+CONSOLE_BASE_URL = "https://YOUR_CONSOLE_HOSTNAME/api/v1.0"  # e.g. https://runzero.yourcompany.com/api/v1.0
+SOURCE_TOKEN     = "PASTE_SOURCE_ORG_API_KEY_HERE"            # source org API key
+SOURCE_ORG_ID    = ""                                         # optional: leave blank for org-scoped tokens
+TARGET_TOKEN     = "PASTE_TARGET_ORG_API_KEY_HERE"            # target org API key
+TARGET_ORG_ID    = ""                                         # optional: leave blank for org-scoped tokens
+TASK_LIMIT       = 10                                         # number of most-recent processed tasks to migrate
+DRY_RUN          = False                                      # True = preview only, no import
+SAVE_SCAN_FILES  = False                                      # True = save .gz files to scan_downloads/
 # ============================================================
-# TARGET ORG CONFIG
-# ============================================================
-TARGET_BASE_URL = "https://console.runzero.com/api/v1.0"  # can be a different console
-TARGET_TOKEN    = "PASTE_TARGET_ORG_API_KEY_HERE"          # API key for the destination org
-TARGET_ORG_ID   = ""                                       # optional: leave blank for org-scoped tokens
 
-TARGET_BASE_URL = os.environ.get("RUNZERO_TARGET_BASE_URL", TARGET_BASE_URL).rstrip("/")
-TARGET_TOKEN    = os.environ.get("RUNZERO_TARGET_TOKEN",    TARGET_TOKEN)
-TARGET_ORG_ID   = os.environ.get("RUNZERO_TARGET_ORG_ID",  TARGET_ORG_ID)
+# Allow environment variable overrides
+CONSOLE_BASE_URL = os.environ.get("RUNZERO_CONSOLE_BASE_URL", CONSOLE_BASE_URL).rstrip("/")
+SOURCE_TOKEN     = os.environ.get("RUNZERO_SOURCE_TOKEN",     SOURCE_TOKEN)
+SOURCE_ORG_ID    = os.environ.get("RUNZERO_SOURCE_ORG_ID",    SOURCE_ORG_ID)
+TARGET_TOKEN     = os.environ.get("RUNZERO_TARGET_TOKEN",     TARGET_TOKEN)
+TARGET_ORG_ID    = os.environ.get("RUNZERO_TARGET_ORG_ID",    TARGET_ORG_ID)
 
-# ============================================================
-# MIGRATION CONFIG
-# ============================================================
-TASK_LIMIT      = 10     # number of most-recent processed scan tasks to migrate
-DRY_RUN         = False  # True = preview tasks without importing anything
-SAVE_SCAN_FILES = False  # True = also save downloaded .gz files to scan_downloads/
+# Internal aliases — both orgs live on the same console
+SOURCE_BASE_URL = CONSOLE_BASE_URL
+TARGET_BASE_URL = CONSOLE_BASE_URL
 
-TIMEOUT_SECONDS = 120    # allow extra time for large scan file downloads
+TIMEOUT_SECONDS = 120
 MAX_RETRIES     = 6
 TABLE_MAX_ROWS  = 50
 COL_MAX_WIDTH   = 40
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── helpers
 
 def _trunc(s: str, width: int) -> str:
     """Shorten a string to fit a column, adding … if truncated."""
@@ -74,7 +69,7 @@ def format_timestamp(ts) -> str:
         return str(ts)
 
 
-# ── HTTP session & retry logic ────────────────────────────────────────────────
+# ── HTTP session & retry logic 
 
 def build_session(token: str, label: str = "migrate") -> requests.Session:
     """Create a reusable HTTP session with the API token pre-configured."""
@@ -141,11 +136,17 @@ def request_with_retries(
     return resp  # defensive: should not be reached
 
 
-# ── config validation ─────────────────────────────────────────────────────────
+# ── config validation
 
 def validate_config() -> bool:
     """Check that required config values have been filled in."""
     ok = True
+    if "YOUR_CONSOLE_HOSTNAME" in CONSOLE_BASE_URL:
+        print(
+            "ERROR: Set CONSOLE_BASE_URL to your self-hosted console address (e.g. https://runzero.yourcompany.com/api/v1.0).",
+            file=sys.stderr,
+        )
+        ok = False
     if not SOURCE_TOKEN or SOURCE_TOKEN == "PASTE_SOURCE_ORG_API_KEY_HERE":
         print(
             "ERROR: Set SOURCE_TOKEN at the top of the script or export RUNZERO_SOURCE_TOKEN=<key>.",
@@ -164,7 +165,7 @@ def validate_config() -> bool:
     return ok
 
 
-# ── source org: fetch scan tasks ──────────────────────────────────────────────
+# ── source org: fetch scan tasks
 
 def fetch_scan_tasks(
     session: requests.Session,
@@ -194,7 +195,7 @@ def fetch_scan_tasks(
     return tasks[:limit]
 
 
-# ── source org: resolve download URL ─────────────────────────────────────────
+# ── source org: resolve download URL 
 
 def resolve_download_url(
     session: requests.Session,
@@ -242,7 +243,7 @@ def resolve_download_url(
     )
 
 
-# ── download scan data ────────────────────────────────────────────────────────
+# ── download scan data 
 
 def download_scan_data(task_id: str, download_url: str) -> Tuple[bytes, str]:
     """
@@ -264,7 +265,7 @@ def download_scan_data(task_id: str, download_url: str) -> Tuple[bytes, str]:
     return data, filename
 
 
-# ── save scan file locally ────────────────────────────────────────────────────
+# ── save scan file locally 
 
 def save_scan_file(task_id: str, data: bytes, filename: str) -> str:
     """Save the scan data bytes to scan_downloads/. Non-fatal on failure."""
@@ -276,7 +277,7 @@ def save_scan_file(task_id: str, data: bytes, filename: str) -> str:
     return out_path
 
 
-# ── target org: import scan data ─────────────────────────────────────────────
+# ── target org: import scan data 
 
 def import_scan_data(
     session: requests.Session,
@@ -295,7 +296,7 @@ def import_scan_data(
     return request_with_retries(session, "POST", url, params=params, files=files)
 
 
-# ── display ───────────────────────────────────────────────────────────────────
+# ── display 
 
 def print_task_table(tasks: List[Dict]) -> None:
     """Print a formatted table of tasks."""
@@ -341,7 +342,7 @@ def print_task_table(tasks: List[Dict]) -> None:
         print(f"  ... and {truncated} more (showing first {TABLE_MAX_ROWS} of {len(tasks)})")
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# ── main
 
 def main() -> int:
     if not validate_config():
@@ -349,10 +350,9 @@ def main() -> int:
 
     print("runZero Scan Task Migration")
     print("=" * 40)
-    print(f"Source org  : {SOURCE_BASE_URL}")
+    print(f"Console     : {CONSOLE_BASE_URL}")
     if SOURCE_ORG_ID:
         print(f"Source OID  : {SOURCE_ORG_ID}")
-    print(f"Target org  : {TARGET_BASE_URL}")
     if TARGET_ORG_ID:
         print(f"Target OID  : {TARGET_ORG_ID}")
     print(f"Task limit  : {TASK_LIMIT}")
