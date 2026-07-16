@@ -6,12 +6,9 @@ load("net", "ip_address")
 DEFAULT_BASE_URL = 'YOUR THREATLOCKER_BASE_URL'  # e.g. https://portalapi.g.threatlocker.com (use your instance host)
 PAGE_SIZE = 200
 MAX_PAGES = 1000  # Safety cap to avoid an infinite pagination loop if the API ignores paging
-DEBUG = True  # Set to False to silence the verbose DEBUG lines in the task log
 
-
-def dbg(msg):
-    if DEBUG:
-        print("DEBUG: {}".format(msg))
+# Set to False to import every record exactly as ThreatLocker returns it.
+DEDUPE_BY_HOSTNAME = True
 
 
 def _preview(value, limit=2000):
@@ -34,6 +31,254 @@ def _add_attr(attrs, key, value):
         attrs[key] = str(value)[:1023]
 
 
+def _hostname_of(computer):
+    # The value runZero correlates on; matches build_asset's primary hostname.
+    return str(computer.get("computerName", computer.get("computername", ""))).strip()
+
+
+def _pad(number, width):
+    # Zero-pad an integer to a fixed width so canonical keys sort lexicographically.
+    s = str(int(number))
+    if len(s) >= width:
+        return s
+    return "0" * (width - len(s)) + s
+
+
+def _canonical(year, month, day, hour, minute, second):
+    # Fixed-width "YYYYMMDDHHMMSS" - lexicographic order == chronological order.
+    return (_pad(year, 4) + _pad(month, 2) + _pad(day, 2) +
+            _pad(hour, 2) + _pad(minute, 2) + _pad(second, 2))
+
+
+def _epoch_seconds_to_canonical(total_secs):
+    # Convert Unix epoch seconds (UTC) to a canonical "YYYYMMDDHHMMSS" key.
+    total_secs = int(total_secs)
+    if total_secs < 0:
+        total_secs = 0
+    days = total_secs // 86400
+    rem = total_secs % 86400
+    hour = rem // 3600
+    minute = (rem % 3600) // 60
+    second = rem % 60
+
+    year = 1970
+    for _ in range(4000):  # safety cap; real check-in dates break out almost immediately
+        leap = (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0))
+        ydays = 366 if leap else 365
+        if days < ydays:
+            break
+        days -= ydays
+        year += 1
+
+    leap = (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0))
+    mdays = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    month = 1
+    for i in range(12):
+        if days < mdays[i]:
+            month = i + 1
+            break
+        days -= mdays[i]
+
+    return _canonical(year, month, days + 1, hour, minute, second)
+
+
+def _key_from_epoch_str(digits):
+    # Interpret a run of digits as epoch seconds / millis / micros by length.
+    n = int(digits)
+    length = len(digits)
+    if length <= 11:        # seconds (10 digits today)
+        secs = n
+    elif length <= 14:      # milliseconds (13 digits today)
+        secs = n // 1000
+    else:                   # microseconds / nanoseconds
+        secs = n // 1000000
+    return (1, _epoch_seconds_to_canonical(secs))
+
+
+def _leading_digits(s):
+    # Leading digit run, dropping any trailing timezone offset (e.g. "...+0000").
+    s = s.strip()
+    for sep in ["+", "-"]:
+        if sep in s:
+            s = s.split(sep)[0]
+    s = s.strip()
+    if s != "" and s.isdigit():
+        return s
+    return ""
+
+
+def _plausible_ymd(ys, ms, ds):
+    # Accept a (year, month, day) triple only if it is a sane calendar date.
+    if not (ys.isdigit() and ms.isdigit() and ds.isdigit()):
+        return None
+    year = int(ys)
+    month = int(ms)
+    day = int(ds)
+    if year < 1900 or year > 2999:
+        return None
+    if month < 1 or month > 12:
+        return None
+    if day < 1 or day > 31:
+        return None
+    return (year, month, day)
+
+
+def _split_time(time_part, ampm):
+    # Parse "HH", "HH:MM" or "HH:MM:SS", ignoring fractional seconds and tz offset.
+    if time_part == "":
+        return (0, 0, 0)
+    t = time_part
+    if "+" in t:
+        t = t.split("+")[0]
+    if "-" in t:
+        t = t.split("-")[0]
+    if "." in t:
+        t = t.split(".")[0]
+
+    tc = t.split(":")
+    hour = int(tc[0]) if len(tc) > 0 and tc[0].isdigit() else 0
+    minute = int(tc[1]) if len(tc) > 1 and tc[1].isdigit() else 0
+    second = int(tc[2]) if len(tc) > 2 and tc[2].isdigit() else 0
+
+    if ampm == "PM" and hour < 12:
+        hour = hour + 12
+    elif ampm == "AM" and hour == 12:
+        hour = 0
+    return (hour, minute, second)
+
+
+def _split_date(date_part):
+    # Parse a date component into (year, month, day) across common separators.
+    sep = None
+    for cand in ["-", "/", "."]:
+        if cand in date_part:
+            sep = cand
+            break
+
+    if sep == None:
+        if date_part.isdigit() and len(date_part) == 8:  # compact YYYYMMDD
+            return _plausible_ymd(date_part[0:4], date_part[4:6], date_part[6:8])
+        return None
+
+    comps = [c for c in date_part.split(sep) if c != ""]
+    if len(comps) != 3:
+        return None
+    if not (comps[0].isdigit() and comps[1].isdigit() and comps[2].isdigit()):
+        return None
+
+    a = int(comps[0])
+    b = int(comps[1])
+
+    if len(comps[0]) == 4:            # YYYY-MM-DD / YYYY/MM/DD (ISO, year first)
+        return _plausible_ymd(comps[0], comps[1], comps[2])
+
+    if len(comps[2]) == 4:            # day/month first, 4-digit year last
+        if sep == ".":                # European dotted DD.MM.YYYY
+            return _plausible_ymd(comps[2], comps[1], comps[0])
+        if a > 12 and b <= 12:        # unambiguous DD/MM/YYYY
+            return _plausible_ymd(comps[2], comps[1], comps[0])
+        if b > 12 and a <= 12:        # unambiguous MM/DD/YYYY
+            return _plausible_ymd(comps[2], comps[0], comps[1])
+        # Ambiguous (both <= 12): assume US MM/DD/YYYY (ThreatLocker/.NET en-US default).
+        return _plausible_ymd(comps[2], comps[0], comps[1])
+
+    return None
+
+
+def _parse_datetime(raw):
+    # Parse an ISO-8601 / US / European date-time string into a canonical key.
+    s = raw.replace("T", " ").replace("t", " ")
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1]
+    s = s.strip()
+
+    parts = [p for p in s.split(" ") if p != ""]
+    if len(parts) == 0:
+        return None
+
+    ymd = _split_date(parts[0])
+    if ymd == None:
+        return None
+
+    time_part = parts[1] if len(parts) > 1 else ""
+    ampm = ""
+    if len(parts) > 2:
+        tok = parts[2].upper()
+        if tok == "AM" or tok == "PM":
+            ampm = tok
+
+    hms = _split_time(time_part, ampm)
+    return _canonical(ymd[0], ymd[1], ymd[2], hms[0], hms[1], hms[2])
+
+
+def _recency_key(value):
+    # Turn many common date formats into a sortable key (bigger == more recent):
+    #   ISO-8601 / RFC-3339, US MM/DD/YYYY, European DD/MM/YYYY & DD.MM.YYYY,
+    #   YYYY/MM/DD, compact YYYYMMDD[HHMMSS], Unix epoch (s/ms/us) and .NET
+    #   "/Date(ms)/". Anything unrecognised falls back to a raw string compare.
+    # Returns a (parsed_ok, key) tuple so parsed dates always outrank unparsed ones.
+    raw = str(value).strip()
+    if raw == "":
+        return (0, "")
+
+    if raw.startswith("/Date(") and raw.endswith(")/"):   # .NET JSON date
+        digits = _leading_digits(raw[6:-2])
+        if digits != "":
+            return _key_from_epoch_str(digits)
+        return (0, raw.lower())
+
+    if raw.isdigit():
+        if len(raw) == 8:                                 # compact date, not epoch
+            ymd = _plausible_ymd(raw[0:4], raw[4:6], raw[6:8])
+            if ymd != None:
+                return (1, _canonical(ymd[0], ymd[1], ymd[2], 0, 0, 0))
+        if len(raw) == 14:                                # compact date-time
+            ymd = _plausible_ymd(raw[0:4], raw[4:6], raw[6:8])
+            if ymd != None:
+                return (1, _canonical(ymd[0], ymd[1], ymd[2],
+                                      int(raw[8:10]), int(raw[10:12]), int(raw[12:14])))
+        return _key_from_epoch_str(raw)                   # Unix epoch (s / ms / us)
+
+    canonical = _parse_datetime(raw)
+    if canonical != None:
+        return (1, canonical)
+
+    return (0, raw.lower())                               # unknown -> best-effort compare
+
+
+def _checkin_recency(computer):
+    # Sortable recency key derived from the check-in timestamp, tolerant of the
+    # many date formats an API might emit. Used to keep the freshest duplicate.
+    value = computer.get("lastCheckinDate", computer.get("lastSeen", ""))
+    return _recency_key(value)
+
+
+def dedupe_by_hostname(computers):
+    # Collapse records that share a hostname down to the single freshest one.
+    # Returns (kept_records, dropped_count). Records with no hostname cannot be
+    # grouped, so they are passed through unchanged (build_asset handles them).
+    best = {}
+    dropped = 0
+    for c in computers:
+        if type(c) != "dict":
+            best["\t__keep__\t{}".format(len(best))] = c
+            continue
+        name = _hostname_of(c)
+        if not name:
+            best["\t__keep__\t{}".format(len(best))] = c
+            continue
+        key = name.lower()
+        current = best.get(key, None)
+        if current == None:
+            best[key] = c
+        elif _checkin_recency(c) > _checkin_recency(current):
+            best[key] = c
+            dropped += 1
+        else:
+            dropped += 1
+    return (best.values(), dropped)
+
+
 def fetch_computers(url, headers):
     computers = []
     page = 1
@@ -48,18 +293,12 @@ def fetch_computers(url, headers):
             "pageNumber": page,
             "pageSize": PAGE_SIZE,
         })
-        dbg("--- Requesting page {} ---".format(page))
-        dbg("POST {}".format(url))
-        dbg("Request body: {}".format(body))
 
         response = http_post(url=url, headers=headers, body=bytes(body))
 
         if not response:
             print("ERROR: ThreatLocker API returned no response object on page {} (network/DNS/TLS failure?).".format(page))
             break
-
-        dbg("Page {} HTTP status: {}".format(page, response.status_code))
-        dbg("Page {} raw response body preview: {}".format(page, _preview(response.body)))
 
         if response.status_code == 401:
             print("ERROR: 401 Unauthorized on page {}. Verify the Authorization header is the RAW API key (no 'Bearer ' prefix) and the key is valid/active. Body: {}".format(page, _preview(response.body)))
@@ -79,12 +318,8 @@ def fetch_computers(url, headers):
 
         data = json_decode(response.body)
         if data == None:
-            print("ERROR: Failed to decode JSON on page {}. The raw body above is not valid JSON. Raw: {}".format(page, _preview(response.body)))
+            print("ERROR: Failed to decode JSON on page {}. The response body is not valid JSON. Raw: {}".format(page, _preview(response.body)))
             break
-
-        dbg("Page {} decoded JSON type: {}".format(page, type(data)))
-        if type(data) == "dict":
-            dbg("Page {} top-level dict keys: [{}]".format(page, _keys(data)))
 
         if type(data) == "list":
             batch = data
@@ -97,22 +332,16 @@ def fetch_computers(url, headers):
             print("WARNING: Page {} unexpected top-level JSON type: {}".format(page, type(data)))
             batch = []
 
-        dbg("Page {} batch size: {}".format(page, len(batch)))
-
         if not batch:
-            dbg("Page {} returned an empty batch; stopping pagination.".format(page))
             break
 
         computers.extend(batch)
-        dbg("Total computers accumulated so far: {}".format(len(computers)))
 
         if len(batch) < PAGE_SIZE:
-            dbg("Batch ({}) smaller than PAGE_SIZE ({}); assuming last page.".format(len(batch), PAGE_SIZE))
             break
 
         page += 1
 
-    dbg("fetch_computers finished: {} total record(s).".format(len(computers)))
     return computers
 
 
@@ -129,7 +358,6 @@ def build_network_interfaces(computer):
                 continue
             parsed = ip_address(raw_ip)
             if not parsed:
-                dbg("Could not parse IP '{}' (mac='{}')".format(raw_ip, mac))
                 continue
             if parsed.version == 4:
                 ipv4s.append(parsed)
@@ -187,14 +415,10 @@ def build_asset(computer):
 
 
 def main(*args, **kwargs):
-    print("INFO: ===== ThreatLocker custom integration starting =====")
-    dbg("kwargs provided: [{}]".format(", ".join(kwargs.keys())))
-
     token = kwargs.get('access_secret', '')
     if not token:
         print('ERROR: No API token. Set access_secret to your ThreatLocker Org API token.')
         return None
-    dbg("access_secret present (length={}).".format(len(token)))
     if token != token.strip():
         print("WARNING: access_secret has leading/trailing whitespace - this can cause 401 Unauthorized.")
 
@@ -204,7 +428,6 @@ def main(*args, **kwargs):
         base_url = DEFAULT_BASE_URL
     if base_url.endswith('/'):
         base_url = base_url[:-1]
-    dbg("Base URL in use: {}".format(base_url))
 
     if base_url == DEFAULT_BASE_URL or "YOUR THREATLOCKER" in base_url:
         print("ERROR: Base URL is still the placeholder. Set access_key to your ThreatLocker instance host, e.g. https://portalapi.g.threatlocker.com")
@@ -213,46 +436,35 @@ def main(*args, **kwargs):
         print("WARNING: Base URL does not start with http:// or https:// (got '{}').".format(base_url))
 
     url = "{}/portalapi/Computer/ComputerGetByAllParameters".format(base_url)
-    dbg("Full request URL: {}".format(url))
 
     headers = {
         "Authorization": token,
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    dbg("Request header names being sent (Authorization value masked): [{}]".format(", ".join(headers.keys())))
 
     computers = fetch_computers(url, headers)
-    dbg("fetch_computers returned {} record(s).".format(len(computers)))
     if not computers:
-        print("WARNING: No computers returned from ThreatLocker API. See the DEBUG lines above for the HTTP status and raw body.")
+        print("WARNING: No computers returned from ThreatLocker API.")
         return []
 
-    # Field-name diagnostics: dump the first record so the real field names are visible in the log.
-    first = computers[0]
-    if type(first) == "dict":
-        dbg("First record top-level keys: [{}]".format(_keys(first)))
-        dbg("First record JSON preview: {}".format(_preview(json_encode(first))))
-    else:
-        print("WARNING: First record is not a dict (type={}). Preview: {}".format(type(first), _preview(first)))
+    if DEDUPE_BY_HOSTNAME:
+        computers, dropped = dedupe_by_hostname(computers)
+        if dropped > 0:
+            print("INFO: Collapsed {} stale duplicate record(s) that shared a hostname; kept the most recent check-in per host. {} record(s) remain.".format(dropped, len(computers)))
 
     assets = []
     skip_reasons = {}
-    logged_samples = 0
     for c in computers:
         asset, reason = build_asset(c)
         if asset:
             assets.append(asset)
         else:
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-            if logged_samples < 5:
-                logged_samples += 1
-                dbg("Skipped record sample #{}: reason='{}'; keys=[{}]".format(logged_samples, reason, _keys(c)))
 
     if skip_reasons:
         for reason in skip_reasons:
             print("INFO: Skipped {} record(s) - {}".format(skip_reasons[reason], reason))
 
     print("INFO: Built {} asset(s) from {} computer record(s).".format(len(assets), len(computers)))
-    print("INFO: ===== ThreatLocker custom integration finished =====")
     return assets
