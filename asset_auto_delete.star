@@ -1,28 +1,19 @@
 load('json', json_encode='encode', json_decode='decode')
 load('http', http_get='get', http_post='post')
 
-# IP Phone Auto-Delete Custom Integration
-#
-# Automatically deletes assets matching:
-#   type:"ip phone" and (hardware:cisco or hardware:mitel)
+# Asset Auto-Delete Custom Integration
 #
 # This runs as a runZero task (custom integration) instead of a standalone cron job.
-#
-# Credentials:
-#   access_secret = Organisation API token
-#   access_key    = Console URL (e.g. https://console.runzero.com)
 
-DEFAULT_BASE_URL = 'https://console.runzero.com'
-DELETE_QUERY = 'type:"ip phone" and (hardware:cisco or hardware:mitel)'
+DEFAULT_BASE_URL = 'https://console-eu.runzero.com'
+DELETE_QUERY = '#ENTER YOUR DELETE QUERY HERE#'
 BATCH_SIZE = 500
-
-ALLOWED_HARDWARE = ('cisco', 'mitel')
 
 
 def fetch_matching_assets(headers, base_url):
-    """Export assets matching the delete query and verify hardware matches."""
+    """Export the IDs of all assets matching the delete query."""
     url = base_url + '/api/v1.0/export/org/assets.json'
-    params = {'search': DELETE_QUERY, 'fields': 'id,type,os,hw,names,addresses'}
+    params = {'search': DELETE_QUERY, 'fields': 'id'}
 
     all_assets = []
     for page in range(1, 101):
@@ -58,14 +49,7 @@ def fetch_matching_assets(headers, base_url):
             asset_id = asset.get('id')
             if not asset_id:
                 continue
-            hw = (asset.get('hw') or '').lower()
-            hw_ok = False
-            for allowed in ALLOWED_HARDWARE:
-                if allowed in hw:
-                    hw_ok = True
-                    break
-            if hw_ok:
-                all_assets.append(asset_id)
+            all_assets.append(asset_id)
 
         if type(data) == 'dict':
             next_key = data.get('next_key')
@@ -106,7 +90,7 @@ def main(*args, **kwargs):
 
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}
 
-    print('IP Phone Auto-Delete')
+    print('Asset Auto-Delete')
     print('Console: {}'.format(base_url))
     print('Query: {}'.format(DELETE_QUERY))
 
