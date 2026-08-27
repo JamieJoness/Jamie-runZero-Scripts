@@ -3,17 +3,21 @@ load('http', http_get='get', http_post='post')
 
 # Asset Auto-Delete Custom Integration
 #
-# This runs as a runZero task (custom integration) instead of a standalone cron job.
+# Deletes every asset matching DELETE_QUERY. Designed to run unattended as a
+# scheduled custom integration task (e.g. daily). The task log records which
+# assets were removed on each run.
 
 DEFAULT_BASE_URL = 'https://console-eu.runzero.com'
-DELETE_QUERY = '#ENTER YOUR DELETE QUERY HERE#'
+DELETE_QUERY = 'type:"IP Phone" or type:mobile'
 BATCH_SIZE = 500
+# Max assets listed individually in the task log; the rest are summarised.
+LOG_ASSET_LIMIT = 200
 
 
 def fetch_matching_assets(headers, base_url):
-    """Export the IDs of all assets matching the delete query."""
+    """Export id/addresses/names of all assets matching the delete query."""
     url = base_url + '/api/v1.0/export/org/assets.json'
-    params = {'search': DELETE_QUERY, 'fields': 'id'}
+    params = {'search': DELETE_QUERY, 'fields': 'id,addresses,names'}
 
     all_assets = []
     for page in range(1, 101):
@@ -49,7 +53,7 @@ def fetch_matching_assets(headers, base_url):
             asset_id = asset.get('id')
             if not asset_id:
                 continue
-            all_assets.append(asset_id)
+            all_assets.append(asset)
 
         if type(data) == 'dict':
             next_key = data.get('next_key')
@@ -61,6 +65,20 @@ def fetch_matching_assets(headers, base_url):
             break
 
     return all_assets
+
+
+def format_asset(asset):
+    """Build an 'address hostname' label for the task log listing."""
+    parts = []
+    addresses = asset.get('addresses')
+    if type(addresses) == 'list' and len(addresses) > 0:
+        parts.append(str(addresses[0]))
+    names = asset.get('names')
+    if type(names) == 'list' and len(names) > 0:
+        parts.append(str(names[0]))
+    if not parts:
+        return '(no address/name)'
+    return ' '.join(parts)
 
 
 def bulk_delete(headers, base_url, asset_ids):
@@ -88,6 +106,11 @@ def main(*args, **kwargs):
     if base_url.endswith('/'):
         base_url = base_url[:-1]
 
+    # An empty search matches every asset, so refuse to run without a query.
+    if not DELETE_QUERY.strip():
+        print('ERROR: DELETE_QUERY is empty. Refusing to run.')
+        return None
+
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}
 
     print('Asset Auto-Delete')
@@ -96,12 +119,24 @@ def main(*args, **kwargs):
 
     # Fetch matching assets
     print('[1/2] Exporting assets matching query...')
-    asset_ids = fetch_matching_assets(headers, base_url)
-    print('  {} asset(s) matched.'.format(len(asset_ids)))
+    matched = fetch_matching_assets(headers, base_url)
+    print('  {} asset(s) matched.'.format(len(matched)))
 
-    if not asset_ids:
+    if not matched:
         print('No matching assets found. Nothing to delete.')
         return None
+
+    # Audit trail: record what this run is removing.
+    print('Deleting the following {} asset(s):'.format(len(matched)))
+    shown = 0
+    for asset in matched:
+        if shown >= LOG_ASSET_LIMIT:
+            print('  ... and {} more.'.format(len(matched) - shown))
+            break
+        print('  {}  {}'.format(asset.get('id'), format_asset(asset)))
+        shown = shown + 1
+
+    asset_ids = [asset.get('id') for asset in matched]
 
     # Delete in batches
     print('[2/2] Deleting assets in batches of {}...'.format(BATCH_SIZE))
@@ -112,10 +147,11 @@ def main(*args, **kwargs):
         batch = asset_ids[i:i + BATCH_SIZE]
         resp = bulk_delete(headers, base_url, batch)
 
-        if resp.status_code == 204 or resp.status_code == 200:
-            deleted = deleted + len(batch)
-            print('  Deleted {}/{}'.format(deleted, len(asset_ids)))
-        elif resp.status_code == -1 and resp.body and len(resp.body) > 0:
+        # status -1 with a body is how the http module reports some successful responses
+        ok = resp.status_code == 204 or resp.status_code == 200 or (
+            resp.status_code == -1 and resp.body and len(resp.body) > 0)
+
+        if ok:
             deleted = deleted + len(batch)
             print('  Deleted {}/{}'.format(deleted, len(asset_ids)))
         else:

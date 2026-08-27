@@ -1,0 +1,104 @@
+{
+  "name": "paged",
+  "integration": "microsoft-defender-av-health",
+  "description": "Three pages linked by @odata.nextLink, exactly as Microsoft's JSON export pages. Proves the walk follows the next link verbatim (it carries Microsoft's own skiptoken), stops when the link is absent, and that every page's rows are reported. The nextLink points back at the configured API base, so the same-origin guard permits it.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE",
+    "page_size": 2
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {
+        "method": "POST",
+        "path": "/fixture-tenant/oauth2/v2.0/token"
+      },
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-page3",
+      "match": {
+        "method": "GET",
+        "path": "/api/deviceavinfo",
+        "query_contains": "skiptoken=page3"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {"machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa05", "computerDnsName": "host05.acme.example", "avIsPlatformUpToDate": "True", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"}
+            ]
+          }
+        }
+      ],
+      "when_exhausted": "error"
+    },
+    {
+      "name": "avinfo-page2",
+      "match": {
+        "method": "GET",
+        "path": "/api/deviceavinfo",
+        "query_contains": "skiptoken=page2"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {"machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03", "computerDnsName": "host03.acme.example", "avIsPlatformUpToDate": "False", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"},
+              {"machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa04", "computerDnsName": "host04.acme.example", "avIsPlatformUpToDate": "Unknown", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"}
+            ],
+            "@odata.nextLink": "$BASE/api/deviceavinfo?%24skiptoken=page3"
+          }
+        }
+      ],
+      "when_exhausted": "error"
+    },
+    {
+      "name": "avinfo-page1",
+      "match": {
+        "method": "GET",
+        "path": "/api/deviceavinfo"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {"machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01", "computerDnsName": "host01.acme.example", "avIsPlatformUpToDate": "True", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"},
+              {"machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02", "computerDnsName": "host02.acme.example", "avIsPlatformUpToDate": "True", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"}
+            ],
+            "@odata.nextLink": "$BASE/api/deviceavinfo?%24skiptoken=page2"
+          }
+        }
+      ],
+      "when_exhausted": "error"
+    }
+  ],
+  "expect": {
+    "asset_count": 5,
+    "ids": [
+      "microsoft-defender-av-health:fixture-tenant:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+      "microsoft-defender-av-health:fixture-tenant:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa03",
+      "microsoft-defender-av-health:fixture-tenant:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa05"
+    ],
+    "request_count": 4,
+    "requests_include": [
+      {"method": "GET", "path_contains": "/api/deviceavinfo", "query_contains": "top=2"},
+      {"query_contains": "skiptoken=page2"},
+      {"query_contains": "skiptoken=page3"}
+    ],
+    "log_contains": [
+      "5 device rows retrieved, 5 assets reported, 0 rows skipped, 0 duplicate rows ignored"
+    ]
+  },
+  "check_determinism": true
+}

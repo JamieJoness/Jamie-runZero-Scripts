@@ -1,0 +1,58 @@
+{
+  "name": "rate-limit",
+  "integration": "microsoft-defender-av-health",
+  "description": "Microsoft rate-limits this API at 30 calls per minute / 1000 per hour and answers excess calls with 429. The first deviceavinfo call is served 429 with Retry-After: 1, then relents. get_json retries 429 by default honoring Retry-After, so the run succeeds without the script doing anything special - which is exactly what this scenario pins: one extra request, same assets, no error.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-throttled-then-ok",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {
+          "status": 429,
+          "headers": {"Retry-After": "1"},
+          "json": {"error": {"code": "TooManyRequests", "message": "Rate limit exceeded"}}
+        },
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {
+                "machineId": "dddddddddddddddddddddddddddddddddddddd01",
+                "computerDnsName": "throttled01.acme.example",
+                "avIsPlatformUpToDate": "False",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z"
+              }
+            ]
+          }
+        }
+      ],
+      "when_exhausted": "error"
+    }
+  ],
+  "expect": {
+    "asset_count": 1,
+    "ids": [
+      "microsoft-defender-av-health:fixture-tenant:dddddddddddddddddddddddddddddddddddddd01"
+    ],
+    "request_count": 3,
+    "log_contains": [
+      "1 device rows retrieved, 1 assets reported, 0 rows skipped, 0 duplicate rows ignored"
+    ]
+  },
+  "check_determinism": false
+}

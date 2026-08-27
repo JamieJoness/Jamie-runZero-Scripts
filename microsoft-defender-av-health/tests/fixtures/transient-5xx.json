@@ -1,0 +1,51 @@
+{
+  "name": "transient-5xx",
+  "integration": "microsoft-defender-av-health",
+  "description": "A transient service hiccup: the first deviceavinfo call answers 503, the retry succeeds. get_json retries 5xx with backoff by default, so the run completes normally. Distinct from hard-failure, where the 500 never relents and the task must end in error.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-flaky",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {"status": 503, "json": {"error": {"code": "ServiceUnavailable"}}},
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {
+                "machineId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee01",
+                "computerDnsName": "flaky01.acme.example",
+                "avIsPlatformUpToDate": "True",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z"
+              }
+            ]
+          }
+        }
+      ],
+      "when_exhausted": "error"
+    }
+  ],
+  "expect": {
+    "asset_count": 1,
+    "ids": [
+      "microsoft-defender-av-health:fixture-tenant:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee01"
+    ],
+    "request_count": 3
+  },
+  "check_determinism": false
+}

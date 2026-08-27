@@ -1,0 +1,84 @@
+{
+  "name": "malformed-and-missing",
+  "integration": "microsoft-defender-av-health",
+  "description": "The defensive paths: a row with no machineId is skipped, a row whose computerDnsName is empty or a placeholder (localhost) is skipped because deviceavinfo carries no MAC or IP and such a record could never correlate, a non-object row is ignored by the dicts() coercion, and a row missing every optional health field still imports with all three verdicts normalized to unknown while the absent raw fields stay absent. Nothing here may abort the run.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {
+                "id": "row-no-machine-id",
+                "computerDnsName": "ghost.acme.example",
+                "avIsPlatformUpToDate": "True"
+              },
+              {
+                "machineId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01",
+                "computerDnsName": "",
+                "avIsPlatformUpToDate": "True"
+              },
+              {
+                "machineId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02",
+                "computerDnsName": "localhost",
+                "avIsPlatformUpToDate": "True"
+              },
+              "not-an-object",
+              {
+                "machineId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+                "computerDnsName": "bare-metal-99.acme.example"
+              }
+            ]
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 1,
+    "assets": [
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb03",
+        "fields": {
+          "platformUpToDate": "unknown",
+          "engineUpToDate": "unknown",
+          "signatureUpToDate": "unknown",
+          "avModeName": "Other"
+        },
+        "fields_absent": [
+          "avIsPlatformUpToDate", "avIsEngineUpToDate", "avIsSignatureUpToDate",
+          "avPlatformVersion", "dataRefreshTimestamp", "dataRefreshTS", "lastSeenTS"
+        ]
+      }
+    ],
+    "ids_absent": [
+      "microsoft-defender-av-health:fixture-tenant:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01",
+      "microsoft-defender-av-health:fixture-tenant:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb02"
+    ],
+    "log_contains": [
+      "skipping row with no machineId",
+      "skipping machine bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01 with no usable hostname",
+      "4 device rows retrieved, 1 assets reported, 3 rows skipped, 0 duplicate rows ignored"
+    ]
+  },
+  "check_determinism": true
+}

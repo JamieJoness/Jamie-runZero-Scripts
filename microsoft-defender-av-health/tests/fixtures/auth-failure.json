@@ -1,0 +1,41 @@
+{
+  "name": "auth-failure",
+  "integration": "microsoft-defender-av-health",
+  "description": "A rejected client secret. Entra answers the client-credentials exchange with 401 invalid_client, and the run must END THE TASK IN ERROR: reporting zero assets and exiting 0 is what an empty tenant looks like, so without the error an operator sees a green task and an estate that appears to have emptied itself. The failure comes from oauth2_token() itself, which raises on any non-2xx, so the assertion is the builtin's own message. 401 is outside the transient retry set, which is what the pinned request count carries. No deviceavinfo request may be made without a token, and the secret must not appear in the log.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "wrong-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token-refused",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {
+          "status": 401,
+          "json": {
+            "error": "invalid_client",
+            "error_description": "AADSTS7000215: Invalid client secret provided."
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 0,
+    "request_count": 1,
+    "requests_absent": [
+      {"path_contains": "/api/deviceavinfo"}
+    ],
+    "script_error": true,
+    "error_contains": [
+      "http.oauth2_token: token endpoint returned status 401"
+    ],
+    "log_absent": ["wrong-secret"]
+  },
+  "check_determinism": false
+}

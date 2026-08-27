@@ -1,0 +1,54 @@
+{
+  "name": "foreign-nextlink",
+  "integration": "microsoft-defender-av-health",
+  "description": "An @odata.nextLink pointing at a host other than the configured API base. The bearer token must never be sent to an unexpected host, so the walk refuses the link and the task ends in error naming the refusal - not silently truncating, and not following it. Page-1 assets were already streamed and are kept.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {"machineId": "abababababababababababababababababababab", "computerDnsName": "page1-host.acme.example", "avIsPlatformUpToDate": "True", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"}
+            ],
+            "@odata.nextLink": "https://evil.example.net/api/deviceavinfo?%24skiptoken=page2"
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 1,
+    "ids": [
+      "microsoft-defender-av-health:fixture-tenant:abababababababababababababababababababab"
+    ],
+    "request_count": 2,
+    "requests_absent": [
+      {"path_contains": "skiptoken"}
+    ],
+    "script_error": true,
+    "error_contains": [
+      "@odata.nextLink outside",
+      "refusing to follow it"
+    ]
+  },
+  "check_determinism": false
+}

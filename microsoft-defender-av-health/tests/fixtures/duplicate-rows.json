@@ -1,0 +1,86 @@
+{
+  "name": "duplicate-rows",
+  "integration": "microsoft-defender-av-health",
+  "description": "Microsoft documents a row per unique (DeviceId, ConfigurationId), so one device can legitimately appear in more than one row - a machine with an active-mode row and an EDR-block-mode row, for example. Emitting the same foreign id twice in one run is never right, so the first row for a machineId wins and later rows are counted and ignored. Two distinct devices sharing a hostname stay distinct assets, because the id is the machineId, not the name.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {
+                "machineId": "cccccccccccccccccccccccccccccccccccccc01",
+                "computerDnsName": "dup-host.acme.example",
+                "avMode": "0",
+                "avIsPlatformUpToDate": "False",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z"
+              },
+              {
+                "machineId": "cccccccccccccccccccccccccccccccccccccc01",
+                "computerDnsName": "dup-host.acme.example",
+                "avMode": "4",
+                "avIsPlatformUpToDate": "Unknown",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z"
+              },
+              {
+                "machineId": "cccccccccccccccccccccccccccccccccccccc02",
+                "computerDnsName": "shared-name.acme.example",
+                "avIsPlatformUpToDate": "True",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z"
+              },
+              {
+                "machineId": "cccccccccccccccccccccccccccccccccccccc03",
+                "computerDnsName": "shared-name.acme.example",
+                "avIsPlatformUpToDate": "False",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z"
+              }
+            ]
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 3,
+    "assets": [
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:cccccccccccccccccccccccccccccccccccccc01",
+        "fields": {
+          "avModeName": "Active",
+          "platformUpToDate": "false"
+        }
+      },
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:cccccccccccccccccccccccccccccccccccccc02",
+        "fields": {"platformUpToDate": "true"}
+      },
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:cccccccccccccccccccccccccccccccccccccc03",
+        "fields": {"platformUpToDate": "false"}
+      }
+    ],
+    "log_contains": [
+      "4 device rows retrieved, 3 assets reported, 0 rows skipped, 1 duplicate rows ignored"
+    ]
+  },
+  "check_determinism": true
+}

@@ -1,0 +1,42 @@
+{
+  "name": "hard-failure",
+  "integration": "microsoft-defender-av-health",
+  "description": "The primary listing cannot be read at all: every deviceavinfo attempt answers 500. get_json makes its bounded retries (four attempts) and hands back an err, and the script must fail() - a run that could not read the inventory reported as green with zero assets is indistinguishable from a tenant that emptied itself. The error names the endpoint's failure and the page.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-broken",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {"status": 500, "json": {"error": {"code": "InternalServerError"}}}
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 0,
+    "request_count": 5,
+    "script_error": true,
+    "error_contains": [
+      "could not read the device antivirus health list",
+      "page 1 failed after reporting 0 assets",
+      "status 500"
+    ]
+  },
+  "check_determinism": false,
+  "timeout": 240
+}

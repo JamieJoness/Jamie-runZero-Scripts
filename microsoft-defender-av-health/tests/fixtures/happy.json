@@ -1,0 +1,176 @@
+{
+  "name": "happy",
+  "integration": "microsoft-defender-av-health",
+  "description": "One page with the three verdicts Microsoft documents: platform up to date (True), not up to date (False), and Unknown. Proves the token exchange hits the v2.0 client-credentials endpoint with the securitycenter scope, the data call carries the bearer token and $top, verdicts are normalized to a lowercase query surface while the verbatim strings are preserved, timestamps gain epoch twins for relative-term queries, and avMode is decoded the way the native integration decodes it. The secret must never appear in the run log.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {
+        "method": "POST",
+        "path": "/fixture-tenant/oauth2/v2.0/token"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "access_token": "fixture-token"
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo",
+      "match": {
+        "method": "GET",
+        "path": "/api/deviceavinfo"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "@odata.context": "$BASE/api/$metadata#DeviceAvInfo",
+            "value": [
+              {
+                "id": "row-guid-1",
+                "machineId": "30a8fa2826abf24d24379b23f8a44d471f00feab",
+                "computerDnsName": "web01.acme.example",
+                "osKind": "windows",
+                "osPlatform": "Windows10",
+                "osVersion": "10.0.19044.1865",
+                "avMode": "0",
+                "avSignatureVersion": "1.371.1279.0",
+                "avEngineVersion": "1.1.19428.0",
+                "avPlatformVersion": "4.18.2206.108",
+                "lastSeenTime": "2026-08-26T19:40:45Z",
+                "quickScanResult": "Completed",
+                "quickScanError": "",
+                "quickScanTime": "2026-08-26T18:40:15.882Z",
+                "fullScanResult": "",
+                "fullScanError": "",
+                "fullScanTime": null,
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z",
+                "avEngineUpdateTime": "2026-08-26T00:03:39Z",
+                "avSignatureUpdateTime": "2026-08-26T00:03:39Z",
+                "avPlatformUpdateTime": "2026-06-20T16:59:35Z",
+                "avIsSignatureUpToDate": "True",
+                "avIsEngineUpToDate": "True",
+                "avIsPlatformUpToDate": "True",
+                "avSignaturePublishTime": "2026-08-26T00:03:39Z",
+                "rbacGroupName": "TVM1",
+                "rbacGroupId": 4415
+              },
+              {
+                "id": "row-guid-2",
+                "machineId": "5a2b1c3d4e5f60718293a4b5c6d7e8f901234567",
+                "computerDnsName": "sql02.acme.example",
+                "osKind": "windows",
+                "osPlatform": "WindowsServer2019",
+                "osVersion": "10.0.17763.4131",
+                "avMode": "1",
+                "avSignatureVersion": "1.371.1001.0",
+                "avEngineVersion": "1.1.19300.2",
+                "avPlatformVersion": "4.18.2107.4",
+                "lastSeenTime": "2026-08-25T04:12:00Z",
+                "quickScanResult": "Failed",
+                "quickScanError": "0x80508023",
+                "dataRefreshTimestamp": "2026-08-26T21:16:23Z",
+                "avIsSignatureUpToDate": "False",
+                "avIsEngineUpToDate": "False",
+                "avIsPlatformUpToDate": "False",
+                "rbacGroupName": "TVM1",
+                "rbacGroupId": 4415
+              },
+              {
+                "id": "row-guid-3",
+                "machineId": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432",
+                "computerDnsName": "kiosk07",
+                "osKind": "windows",
+                "osPlatform": "Windows11",
+                "osVersion": "10.0.22621.1928",
+                "avMode": "4",
+                "avIsSignatureUpToDate": "Unknown",
+                "avIsEngineUpToDate": "Unknown",
+                "avIsPlatformUpToDate": "Unknown",
+                "dataRefreshTimestamp": "2026-08-19T09:00:00Z"
+              }
+            ]
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 3,
+    "assets": [
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:30a8fa2826abf24d24379b23f8a44d471f00feab",
+        "fields": {
+          "platformUpToDate": "true",
+          "engineUpToDate": "true",
+          "signatureUpToDate": "true",
+          "avModeName": "Active",
+          "avMode": "0",
+          "avIsPlatformUpToDate": "True",
+          "avPlatformVersion": "4.18.2206.108",
+          "avEngineVersion": "1.1.19428.0",
+          "avSignatureVersion": "1.371.1279.0",
+          "machineId": "30a8fa2826abf24d24379b23f8a44d471f00feab",
+          "computerDnsName": "web01.acme.example",
+          "quickScanResult": "Completed",
+          "rbacGroupName": "TVM1",
+          "rbacGroupId": "4415",
+          "dataRefreshTimestamp": "2026-08-26T21:16:23Z",
+          "dataRefreshTS": "1787778983",
+          "lastSeenTS": "1787773245"
+        },
+        "fields_absent": ["fullScanResult", "fullScanError", "fullScanTime", "quickScanError"]
+      },
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:5a2b1c3d4e5f60718293a4b5c6d7e8f901234567",
+        "fields": {
+          "platformUpToDate": "false",
+          "engineUpToDate": "false",
+          "signatureUpToDate": "false",
+          "avModeName": "Passive",
+          "avIsPlatformUpToDate": "False",
+          "quickScanResult": "Failed",
+          "quickScanError": "0x80508023"
+        }
+      },
+      {
+        "id": "microsoft-defender-av-health:fixture-tenant:9f8e7d6c5b4a39281706f5e4d3c2b1a098765432",
+        "fields": {
+          "platformUpToDate": "unknown",
+          "engineUpToDate": "unknown",
+          "signatureUpToDate": "unknown",
+          "avModeName": "EDRBlocked",
+          "avIsPlatformUpToDate": "Unknown",
+          "dataRefreshTS": "1787130000"
+        },
+        "fields_absent": ["avPlatformVersion", "avEngineVersion", "avSignatureVersion", "lastSeenTime", "lastSeenTS"]
+      }
+    ],
+    "request_count": 2,
+    "requests_include": [
+      {"method": "POST", "path_contains": "/oauth2/v2.0/token"},
+      {"method": "GET", "path_contains": "/api/deviceavinfo", "query_contains": "top=10000"},
+      {"header_contains": "fixture-token"}
+    ],
+    "log_contains": [
+      "3 device rows retrieved, 3 assets reported, 0 rows skipped, 0 duplicate rows ignored"
+    ],
+    "log_absent": ["fixture-secret"]
+  },
+  "check_determinism": true
+}

@@ -1,0 +1,39 @@
+{
+  "name": "empty",
+  "integration": "microsoft-defender-av-health",
+  "description": "A tenant with no device antivirus health rows at all. Zero assets is a legitimate result - a brand-new tenant, or one with nothing onboarded to Defender for Endpoint - so the run succeeds, says plainly that Microsoft reported nothing, and does not dress the empty estate up as an error.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-empty",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {"status": 200, "json": {"value": []}}
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "expect": {
+    "asset_count": 0,
+    "request_count": 2,
+    "log_contains": [
+      "0 device rows retrieved, 0 assets reported, 0 rows skipped, 0 duplicate rows ignored",
+      "Microsoft reported no device antivirus health rows for this tenant"
+    ]
+  },
+  "check_determinism": false
+}

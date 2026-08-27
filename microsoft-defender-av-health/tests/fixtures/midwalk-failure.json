@@ -1,0 +1,65 @@
+{
+  "name": "midwalk-failure",
+  "integration": "microsoft-defender-av-health",
+  "description": "Page 1 is read and its assets are streamed, then page 2 fails permanently. Assets already handed to report_asset are kept - they were written before the failure - but the task must still END IN ERROR, because breaking out and reporting success would file a truncated estate as a complete one and every device on the unread pages would look decommissioned. The scenario asserts BOTH: the page-1 assets and the error naming page 2.",
+  "kwargs": {
+    "tenant_id": "fixture-tenant",
+    "client_id": "fixture-client",
+    "client_secret": "fixture-secret",
+    "login_url": "$BASE",
+    "api_url": "$BASE"
+  },
+  "routes": [
+    {
+      "name": "token",
+      "match": {"method": "POST", "path": "/fixture-tenant/oauth2/v2.0/token"},
+      "responses": [
+        {"status": 200, "json": {"token_type": "Bearer", "expires_in": 3600, "access_token": "fixture-token"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-page2-broken",
+      "match": {
+        "method": "GET",
+        "path": "/api/deviceavinfo",
+        "query_contains": "skiptoken=page2"
+      },
+      "responses": [
+        {"status": 500, "json": {"error": {"code": "InternalServerError"}}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "avinfo-page1",
+      "match": {"method": "GET", "path": "/api/deviceavinfo"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "value": [
+              {"machineId": "ffffffffffffffffffffffffffffffffffffff01", "computerDnsName": "kept01.acme.example", "avIsPlatformUpToDate": "False", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"},
+              {"machineId": "ffffffffffffffffffffffffffffffffffffff02", "computerDnsName": "kept02.acme.example", "avIsPlatformUpToDate": "True", "dataRefreshTimestamp": "2026-08-26T21:16:23Z"}
+            ],
+            "@odata.nextLink": "$BASE/api/deviceavinfo?%24skiptoken=page2"
+          }
+        }
+      ],
+      "when_exhausted": "error"
+    }
+  ],
+  "expect": {
+    "asset_count": 2,
+    "ids": [
+      "microsoft-defender-av-health:fixture-tenant:ffffffffffffffffffffffffffffffffffffff01",
+      "microsoft-defender-av-health:fixture-tenant:ffffffffffffffffffffffffffffffffffffff02"
+    ],
+    "script_error": true,
+    "error_contains": [
+      "page 2 failed after reporting 2 assets",
+      "status 500"
+    ]
+  },
+  "check_determinism": false,
+  "timeout": 240
+}
