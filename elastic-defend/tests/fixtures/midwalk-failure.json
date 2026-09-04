@@ -1,0 +1,70 @@
+{
+  "name": "midwalk-failure",
+  "integration": "elastic-defend",
+  "description": "A page failing partway through the walk. Page one imports two endpoints; the request for page two answers 400 (deliberately outside the retry set, so the failure is immediate). The two streamed assets are kept, the summary still prints, and the task then ends in error naming how much was reported -- the alternative, breaking and returning success, would file a truncated estate as a complete one.",
+  "kwargs": {
+    "url": "$BASE",
+    "api_key": "fixture-api-key",
+    "page_size": "2"
+  },
+  "routes": [
+    {
+      "name": "page-two",
+      "match": {"method": "GET", "path": "/api/endpoint/metadata", "query_contains": "page=1"},
+      "responses": [
+        {"status": 400, "json": {"statusCode": 400, "error": "Bad Request", "message": "fixture mid-walk failure"}}
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "page-one",
+      "match": {"method": "GET", "path": "/api/endpoint/metadata"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "data": [
+              {
+                "host_status": "healthy",
+                "last_checkin": "2026-08-30T10:00:00.000Z",
+                "metadata": {
+                  "agent": {"id": "aaaaaaaa-2222-4000-8000-000000000001", "version": "8.15.2"},
+                  "host": {"hostname": "fixture-21", "ip": ["10.40.0.1"], "mac": ["00:16:3e:22:00:01"], "os": {"name": "Windows", "version": "23H2"}}
+                }
+              },
+              {
+                "host_status": "healthy",
+                "last_checkin": "2026-08-30T10:01:00.000Z",
+                "metadata": {
+                  "agent": {"id": "bbbbbbbb-2222-4000-8000-000000000002", "version": "8.15.2"},
+                  "host": {"hostname": "fixture-22", "ip": ["10.40.0.2"], "mac": ["00:16:3e:22:00:02"], "os": {"name": "Linux", "version": "22.04"}}
+                }
+              }
+            ],
+            "page": 0,
+            "pageSize": 2,
+            "total": 5
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "default_response": {"status": 404, "text": "no fixture route"},
+  "expect": {
+    "asset_count": 2,
+    "ids": [
+      "elastic-defend:$HOST:aaaaaaaa-2222-4000-8000-000000000001",
+      "elastic-defend:$HOST:bbbbbbbb-2222-4000-8000-000000000002"
+    ],
+    "request_count": 2,
+    "script_error": true,
+    "error_contains": [
+      "elastic-defend: page request failed after reporting 2",
+      "status 400"
+    ],
+    "log_contains": [
+      "elastic-defend: reported 2 of 5 endpoints"
+    ]
+  }
+}

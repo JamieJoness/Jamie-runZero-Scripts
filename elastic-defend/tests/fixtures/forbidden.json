@@ -1,0 +1,31 @@
+{
+  "name": "forbidden",
+  "integration": "elastic-defend",
+  "description": "An API key that authenticates but lacks the Kibana Security privilege. The task must fail, and the log must point the operator at the missing privilege rather than leaving a bare 403 to decode.",
+  "kwargs": {
+    "url": "$BASE",
+    "api_key": "underprivileged-fixture-key"
+  },
+  "routes": [
+    {
+      "match": {"method": "GET", "path": "/api/endpoint/metadata"},
+      "responses": [
+        {"status": 403, "json": {"statusCode": 403, "error": "Forbidden", "message": "Endpoint authorization failure"}}
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "default_response": {"status": 404, "text": "no fixture route"},
+  "expect": {
+    "asset_count": 0,
+    "request_count": 1,
+    "script_error": true,
+    "error_contains": [
+      "elastic-defend: could not read the endpoint list",
+      "status 403"
+    ],
+    "log_contains": [
+      "elastic-defend: the API key was accepted but lacks privileges"
+    ]
+  }
+}

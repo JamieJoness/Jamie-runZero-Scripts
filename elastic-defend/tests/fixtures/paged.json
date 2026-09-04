@@ -1,0 +1,90 @@
+{
+  "name": "paged",
+  "integration": "elastic-defend",
+  "description": "A 0-based walk, which is what every shipped Kibana implements. The first request carries no page parameter at all -- the server answers with its first page under either numbering convention -- and the response's own page number (0) plus one drives the second request. The walk stops once the rows seen reach total, without asking for a third page.",
+  "kwargs": {
+    "url": "$BASE",
+    "api_key": "fixture-api-key",
+    "page_size": "2"
+  },
+  "routes": [
+    {
+      "name": "page-two",
+      "match": {"method": "GET", "path": "/api/endpoint/metadata", "query_contains": "page=1"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "data": [
+              {
+                "host_status": "healthy",
+                "last_checkin": "2026-08-30T10:02:00.000Z",
+                "metadata": {
+                  "agent": {"id": "cccccccc-0000-4000-8000-000000000003", "version": "8.15.2"},
+                  "host": {"hostname": "fixture-03", "ip": ["10.20.0.3"], "mac": ["00:16:3e:00:00:03"], "os": {"name": "Windows", "version": "23H2"}}
+                }
+              }
+            ],
+            "page": 1,
+            "pageSize": 2,
+            "total": 3
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    },
+    {
+      "name": "page-one",
+      "match": {"method": "GET", "path": "/api/endpoint/metadata"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "data": [
+              {
+                "host_status": "healthy",
+                "last_checkin": "2026-08-30T10:00:00.000Z",
+                "metadata": {
+                  "agent": {"id": "aaaaaaaa-0000-4000-8000-000000000001", "version": "8.15.2"},
+                  "host": {"hostname": "fixture-01", "ip": ["10.20.0.1"], "mac": ["00:16:3e:00:00:01"], "os": {"name": "Windows", "version": "23H2"}}
+                }
+              },
+              {
+                "host_status": "offline",
+                "last_checkin": "2026-08-30T10:01:00.000Z",
+                "metadata": {
+                  "agent": {"id": "bbbbbbbb-0000-4000-8000-000000000002", "version": "8.15.2"},
+                  "host": {"hostname": "fixture-02", "ip": ["10.20.0.2"], "mac": ["00:16:3e:00:00:02"], "os": {"name": "Linux", "version": "22.04"}}
+                }
+              }
+            ],
+            "page": 0,
+            "pageSize": 2,
+            "total": 3
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "default_response": {"status": 404, "text": "no fixture route"},
+  "expect": {
+    "asset_count": 3,
+    "ids": [
+      "elastic-defend:$HOST:aaaaaaaa-0000-4000-8000-000000000001",
+      "elastic-defend:$HOST:bbbbbbbb-0000-4000-8000-000000000002",
+      "elastic-defend:$HOST:cccccccc-0000-4000-8000-000000000003"
+    ],
+    "request_count": 2,
+    "requests_include": [
+      {"method": "GET", "path": "/api/endpoint/metadata", "query_contains": "pageSize=2"},
+      {"query_contains": "page=1"}
+    ],
+    "requests_absent": [
+      {"query_contains": "page=0"},
+      {"query_contains": "page=2"}
+    ],
+    "log_contains": ["elastic-defend: reported 3 of 3 endpoints"]
+  },
+  "check_determinism": true
+}

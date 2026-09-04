@@ -1,0 +1,43 @@
+{
+  "name": "transient-5xx",
+  "integration": "elastic-defend",
+  "description": "A transient 503 on the first attempt, then a clean answer. The shared helper retries 503 with backoff, so the import succeeds without the script seeing an error at all -- two requests, one asset, no task failure.",
+  "kwargs": {
+    "url": "$BASE",
+    "api_key": "fixture-api-key"
+  },
+  "routes": [
+    {
+      "match": {"method": "GET", "path": "/api/endpoint/metadata"},
+      "responses": [
+        {"status": 503, "json": {"statusCode": 503, "error": "Service Unavailable", "message": "try again"}},
+        {
+          "status": 200,
+          "json": {
+            "data": [
+              {
+                "host_status": "healthy",
+                "last_checkin": "2026-08-30T10:00:00.000Z",
+                "metadata": {
+                  "agent": {"id": "aaaaaaaa-3333-4000-8000-000000000001", "version": "8.15.2"},
+                  "host": {"hostname": "fixture-31", "ip": ["10.50.0.1"], "mac": ["00:16:3e:33:00:01"], "os": {"name": "macOS", "version": "14.5"}}
+                }
+              }
+            ],
+            "page": 0,
+            "pageSize": 100,
+            "total": 1
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "default_response": {"status": 404, "text": "no fixture route"},
+  "expect": {
+    "asset_count": 1,
+    "ids": ["elastic-defend:$HOST:aaaaaaaa-3333-4000-8000-000000000001"],
+    "request_count": 2,
+    "log_contains": ["elastic-defend: reported 1 of 1 endpoints"]
+  }
+}

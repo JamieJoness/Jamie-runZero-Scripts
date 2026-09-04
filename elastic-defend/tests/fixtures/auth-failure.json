@@ -1,0 +1,28 @@
+{
+  "name": "auth-failure",
+  "integration": "elastic-defend",
+  "description": "A rejected API key. The very first request answers 401, so nothing was read, and the run must END THE TASK IN ERROR rather than filing an empty estate as a success. 401 is not in the shared helper's retry set, so exactly one request is made.",
+  "kwargs": {
+    "url": "$BASE",
+    "api_key": "revoked-fixture-key"
+  },
+  "routes": [
+    {
+      "match": {"method": "GET", "path": "/api/endpoint/metadata"},
+      "responses": [
+        {"status": 401, "json": {"statusCode": 401, "error": "Unauthorized", "message": "Unable to authenticate user"}}
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "default_response": {"status": 404, "text": "no fixture route"},
+  "expect": {
+    "asset_count": 0,
+    "request_count": 1,
+    "script_error": true,
+    "error_contains": [
+      "elastic-defend: could not read the endpoint list",
+      "status 401"
+    ]
+  }
+}

@@ -1,0 +1,176 @@
+{
+  "name": "happy",
+  "integration": "elastic-defend",
+  "description": "The core import path: one page of HostInfo rows behind ApiKey auth, with the kuery and hostStatuses passthrough asserted on the request. Pinned here: the id scheme (elastic-defend:<kibana-host>:<agent-id>); os.Ext.variant preferred over os.name; loopback and link-local addresses dropped from interfaces while the raw list survives as an attribute; MACs on interfaces of their own; 'localhost' scrubbed from hostnames while host.hostname still imports; the isolated tag from Endpoint.state.isolation; a row with no agent id skipped with a log line; a bare string row counted as skipped; and the policy/agent enrichment attributes.",
+  "kwargs": {
+    "url": "$BASE",
+    "api_key": "fixture-api-key",
+    "kuery": "united.endpoint.host.os.name:Windows",
+    "host_statuses": "healthy,offline"
+  },
+  "routes": [
+    {
+      "name": "metadata",
+      "match": {"method": "GET", "path": "/api/endpoint/metadata"},
+      "responses": [
+        {
+          "status": 200,
+          "json": {
+            "data": [
+              {
+                "host_status": "healthy",
+                "last_checkin": "2026-08-30T15:47:57.432Z",
+                "policy_info": {
+                  "agent": {
+                    "applied": {"id": "agent-policy-1", "revision": 3},
+                    "configured": {"id": "agent-policy-1", "revision": 4}
+                  },
+                  "endpoint": {"id": "package-policy-1", "revision": 2}
+                },
+                "metadata": {
+                  "agent": {
+                    "id": "285297c6-3bff-4b83-9a07-f3e749801123",
+                    "type": "endpoint",
+                    "version": "8.15.2",
+                    "build": {"original": "8.15.2 build 42"}
+                  },
+                  "elastic": {"agent": {"id": "285297c6-3bff-4b83-9a07-f3e749801123"}},
+                  "Endpoint": {
+                    "status": "enrolled",
+                    "capabilities": ["isolation", "kill_process"],
+                    "configuration": {"isolation": true},
+                    "state": {"isolation": true},
+                    "policy": {
+                      "applied": {
+                        "id": "d5371dcd-93b7-4627-af88-4084f7d6aa3e",
+                        "name": "Workstations policy",
+                        "status": "success",
+                        "endpoint_policy_version": 5,
+                        "version": 7
+                      }
+                    }
+                  },
+                  "host": {
+                    "hostname": "WIN-FIXTURE-01",
+                    "name": "win-fixture-01.corp.example.com",
+                    "id": "c2c8e6cc-4a2f-4b56-b111-000000000001",
+                    "architecture": "x86_64",
+                    "ip": ["10.10.1.5", "fe80::1c2a:00ff:fe4b:1", "127.0.0.1"],
+                    "mac": ["00:16:3e:aa:bb:01", "00:16:3e:aa:bb:02"],
+                    "os": {
+                      "name": "Windows",
+                      "full": "Windows 10 Pro 20H2",
+                      "platform": "windows",
+                      "family": "windows",
+                      "version": "20H2",
+                      "kernel": "10.0.19042.1288",
+                      "Ext": {"variant": "Windows 10 Pro"}
+                    }
+                  }
+                }
+              },
+              {
+                "host_status": "offline",
+                "last_checkin": "2026-08-29T09:12:00.000Z",
+                "metadata": {
+                  "agent": {"id": "9a1f0c7e-2222-4d60-bb98-e22640cae2a8", "version": "8.15.0"},
+                  "Endpoint": {"status": "enrolled", "state": {"isolation": false}},
+                  "host": {
+                    "hostname": "srv-ubuntu-01",
+                    "name": "localhost",
+                    "id": "c2c8e6cc-4a2f-4b56-b111-000000000002",
+                    "ip": ["10.10.2.9"],
+                    "mac": [],
+                    "os": {
+                      "name": "Linux",
+                      "full": "Ubuntu 22.04.1",
+                      "platform": "ubuntu",
+                      "family": "debian",
+                      "version": "22.04.1",
+                      "kernel": "5.15.0-91-generic"
+                    }
+                  }
+                }
+              },
+              {
+                "host_status": "healthy",
+                "metadata": {
+                  "agent": {"version": "8.15.0"},
+                  "host": {"hostname": "no-agent-id-host", "ip": ["10.10.3.3"]}
+                }
+              },
+              "a bare string where a HostInfo object is documented"
+            ],
+            "page": 0,
+            "pageSize": 100,
+            "total": 4
+          }
+        }
+      ],
+      "when_exhausted": "repeat_last"
+    }
+  ],
+  "default_response": {"status": 404, "text": "no fixture route"},
+  "expect": {
+    "asset_count": 2,
+    "ids": [
+      "elastic-defend:$HOST:285297c6-3bff-4b83-9a07-f3e749801123",
+      "elastic-defend:$HOST:9a1f0c7e-2222-4d60-bb98-e22640cae2a8"
+    ],
+    "assets": [
+      {
+        "id": "elastic-defend:$HOST:285297c6-3bff-4b83-9a07-f3e749801123",
+        "fields": {
+          "os": "Windows 10 Pro",
+          "osVersion": "20H2",
+          "macAddresses": "00:16:3e:aa:bb:01\t00:16:3e:aa:bb:02",
+          "ipAddresses": "10.10.1.5",
+          "tags": "isolated",
+          "elastic_defend_agent_version": "8.15.2",
+          "elastic_defend_host_status": "healthy",
+          "elastic_defend_policy_applied_name": "Workstations policy",
+          "elastic_defend_policy_applied_status": "success",
+          "elastic_defend_agent_policy_applied_revision": "3",
+          "elastic_defend_agent_policy_configured_revision": "4",
+          "elastic_defend_capabilities": "isolation,kill_process",
+          "elastic_defend_host_id": "c2c8e6cc-4a2f-4b56-b111-000000000001"
+        }
+      },
+      {
+        "id": "elastic-defend:$HOST:9a1f0c7e-2222-4d60-bb98-e22640cae2a8",
+        "comment": "'localhost' in host.name is a placeholder every misconfigured resolver shares; it must not become a hostname while host.hostname still imports. No variant, so os falls back to os.name.",
+        "fields": {
+          "hostnames": "srv-ubuntu-01",
+          "os": "Linux",
+          "osVersion": "22.04.1",
+          "ipAddresses": "10.10.2.9",
+          "elastic_defend_host_status": "offline"
+        },
+        "fields_absent": ["macAddresses"]
+      }
+    ],
+    "request_count": 1,
+    "requests_include": [
+      {
+        "method": "GET",
+        "path": "/api/endpoint/metadata",
+        "query_contains": "pageSize=100",
+        "header_contains": "ApiKey fixture-api-key"
+      },
+      {"query_contains": "kuery=united.endpoint.host.os.name%3AWindows"},
+      {"query_contains": "hostStatuses=healthy"},
+      {"query_contains": "hostStatuses=offline"},
+      {"header": {"Elastic-Api-Version": "2023-10-31"}}
+    ],
+    "requests_absent": [
+      {"query_contains": "page=0"},
+      {"query_contains": "page=1"}
+    ],
+    "log_contains": [
+      "elastic-defend: skipping endpoint with no agent id: hostname=no-agent-id-host",
+      "elastic-defend: skipped 2 records with no usable agent id",
+      "elastic-defend: reported 2 of 4 endpoints"
+    ]
+  },
+  "check_determinism": true
+}
