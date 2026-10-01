@@ -130,9 +130,42 @@ block builds the credential form. Enter secrets in that form, not in source,
 example commands, tickets or chat.
 
 Keep `dry_run=true` for the first execution. Preview mode reads runZero and
-Halo, checks for existing tickets, and prints the complete proposed digest
-without posting a ticket. Preview logs contain internal inventory data;
-restrict access and retention accordingly. A preview does not reserve the week.
+Halo, checks for existing tickets, and writes the proposed ticket summary and
+body to the log without posting a ticket. It is a **plain-text, log-based
+preview**, not a separate file or a Halo-rendered ticket. A preview does not
+reserve the week.
+
+#### Where to see the preview
+
+- **Normal integration task:** leave `dry_run=true`, run the task, then open the
+  completed task and select **Download task log**. Open the downloaded log
+  (decompress it if necessary) and search for `PREVIEW ONLY`. The task's
+  on-screen **Errors/Warnings** panel does not show this informational output.
+- **Integration editor:** set `dry_run=true` in the test credentials and select
+  **Run test**. Read the output panel below the editor; no task-log download is
+  needed. This executes real API requests, so keep preview mode enabled.
+- **runZero CLI:** run the script with `dry_run=true`; the preview appears in
+  the terminal output.
+
+The body appears between `PREVIEW BEGIN: <reference>` and
+`PREVIEW END: <reference>`. Look for the matching end marker before treating
+the preview as complete. When nothing matches, the script reports that no
+certificates expire within the window and does not produce a ticket preview.
+
+The script prints each body line separately and splits unusually long lines
+into messages of at most 3,000 UTF-8 bytes without breaking characters. This
+leaves room for logging prefixes under the editor's 4 KiB per-message cap;
+the ticket sent to Halo is not split or changed.
+
+The editor still has a **500-message limit** and a **120-second run limit**.
+An early log message explains what to do if `PREVIEW END` is missing. For a
+large digest, use a normal preview task and download its log, or use the CLI;
+do not assume that a successful editor run displayed the entire preview.
+Editor tests run on the Console and cannot reach private endpoints. Use an
+appropriately placed Explorer or CLI for those endpoints.
+
+Preview logs contain internal inventory data; restrict access and retention
+accordingly.
 
 Use HTTPS in production and leave TLS verification enabled. Separate
 `runzero_tls_*` / `runzero_http_*` and `halo_tls_*` / `halo_http_*` options support

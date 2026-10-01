@@ -204,6 +204,7 @@ load("time", "now", "parse_ts", "from_timestamp")
 DAY_SECONDS = 86400
 WEEK_SECONDS = 604800
 WINDOW_SECONDS = 1209600
+PREVIEW_LOG_BYTES = 3000
 
 def checked_uuid(value, label):
     value = as_text(value).lower()
@@ -551,6 +552,22 @@ def verify_created_ticket(ctx, ticket_id):
     if as_int(ticket.get("tickettype_id")) != get_int(ctx["kwargs"], "halo_tickettype_id") or as_int(ticket.get("team_id")) != get_int(ctx["kwargs"], "halo_team_id"):
         fail("Halo ticket {} exists but its type or team differs from the requested routing; review Halo rules without creating another ticket".format(ticket_id))
 
+def print_preview_line(line):
+    if len(line) <= PREVIEW_LOG_BYTES:
+        print(line)
+        return
+    chunk = []
+    chunk_bytes = 0
+    for character in line.codepoints():
+        if chunk_bytes + len(character) > PREVIEW_LOG_BYTES:
+            print("".join(chunk))
+            chunk = []
+            chunk_bytes = 0
+        chunk.append(character)
+        chunk_bytes += len(character)
+    if chunk:
+        print("".join(chunk))
+
 def main(**kwargs):
     ctx = make_context(kwargs)
     token = authenticate_halo(kwargs)
@@ -566,8 +583,12 @@ def main(**kwargs):
     ticket = make_ticket(ctx, groups)
     if get_bool(kwargs, "dry_run"):
         print("PREVIEW ONLY; no Halo ticket was created. Existing ticket: {}".format(existing or "none"))
+        print("The editor shows at most 500 log messages. If PREVIEW END is missing, use Download task log on a completed preview task or run the preview with the CLI.")
         print(ticket["summary"])
-        print(ticket["details"])
+        print("PREVIEW BEGIN: {}".format(ctx["reference"]))
+        for line in ticket["details"].split("\n"):
+            print_preview_line(line)
+        print("PREVIEW END: {}".format(ctx["reference"]))
         return None
     existing = find_existing_ticket(ctx)
     if existing:

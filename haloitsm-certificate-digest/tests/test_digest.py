@@ -213,7 +213,32 @@ class DigestTests(unittest.TestCase):
         self.kwargs["dry_run"] = "true"
         self.kwargs["single_runner_confirmed"] = "false"
         self.configure()
-        self.assertIn("PREVIEW ONLY", self.run_script())
+        log = self.run_script()
+        self.assertIn("PREVIEW ONLY", log)
+        self.assertIn("PREVIEW BEGIN: " + self.reference, log)
+        self.assertIn("PREVIEW END: " + self.reference, log)
+        self.assertEqual(self.posts(), [])
+
+    def test_preview_messages_preserve_long_unicode_lines(self):
+        self.kwargs["dry_run"] = "true"
+        certificate_name = "start-" + "\u00e9\u20ac\U00010348" * 1200 + "-finish"
+        self.certificate["cn"] = certificate_name
+        self.configure()
+        log = self.run_script()
+        messages = []
+        for line in log.splitlines():
+            _, separator, encoded = line.partition(" msg=")
+            if separator:
+                message, _ = json.JSONDecoder().raw_decode(encoded)
+                if message.startswith("script: "):
+                    messages.append(message.removeprefix("script: "))
+        self.assertTrue(messages, log)
+        self.assertTrue(all(len(message.encode("utf-8")) <= 3000 for message in messages))
+        self.assertIn("1. " + certificate_name, "".join(messages))
+        self.assertNotIn("\ufffd", "".join(messages))
+        self.assertIn("Complete digest: " + self.reference, messages)
+        self.assertIn("PREVIEW END: " + self.reference, messages)
+        self.assertTrue(any("500 log messages" in message for message in messages))
         self.assertEqual(self.posts(), [])
 
     def test_shared_certificate_retains_distinct_hosts_and_service_pages(self):
