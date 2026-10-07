@@ -82,9 +82,17 @@ source and the destination are two runZero consoles.
    either enable `hide_tasks_on_sync` so synced tasks drop out of the list and older ones surface
    on later runs, or run with time-bounded filters.
 
-3. **Create the Credential for the Custom Integration**
+
+3. **Create the Custom Integration**
+   - Go to [runZero Custom Integrations](https://console.runzero.com/custom-integrations/new).
+   - Add a Name and Icon for the integration (e.g., "Task Sync").
+   - Toggle `Enable custom integration script` to input the finalized script.
+   - Click `Validate` to ensure it has valid syntax.
+   - Click `Save` to create the Custom Integration.
+
+4. **Create the Credential for the Custom Integration**
    - Go to [runZero Credentials](https://console.runzero.com/credentials).
-   - Select `Custom Integration Script Secrets`.
+   - Select `<name of custom integration> Script Secrets`.
    - **Source runZero URL** (`src_url`): optional; defaults to `https://console.runzero.com`. Set it to `https://console-eu.runzero.com` for an EU tenant.
    - **Source org ID** (`src_org_id`): the organization to read tasks from.
    - **Source task search filter** (`src_task_search_filter`): optional; which tasks to sync. Default `type:scan`.
@@ -97,12 +105,6 @@ source and the destination are two runZero consoles.
    - **Destination API token** (`dst_api_token`): the `OT` token for the destination organization.
    - TLS and HTTP options are separate for each side, prefixed `src_tls_` / `dst_tls_` and `src_http_` / `dst_http_`, so a self-hosted console with a private certificate can be configured without loosening anything on the other end.
 
-4. **Create the Custom Integration**
-   - Go to [runZero Custom Integrations](https://console.runzero.com/custom-integrations/new).
-   - Add a Name and Icon for the integration (e.g., "Task Sync").
-   - Toggle `Enable custom integration script` to input the finalized script.
-   - Click `Validate` to ensure it has valid syntax.
-   - Click `Save` to create the Custom Integration.
 
 5. **Create the Custom Integration Task**
    - Go to [runZero Ingest](https://console.runzero.com/ingest/custom/).
