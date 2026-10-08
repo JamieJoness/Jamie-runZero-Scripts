@@ -43,7 +43,7 @@ sources by MAC, IP, and hostname like any other pair of sources.
    - Click `Save` to create the Custom Integration.
    - The script embeds its `CONFIG` block, so the credential form is generated automatically with the fields below.
 2. [Create the Credential for the Custom Integration](https://console.runzero.com/credentials).
-   - Select the type `Custom Integration Script Secrets`.
+   - Select the option that matches your custom integration name eg `Trellix-RSD Script Secrets`.
    - **ePolicy Orchestrator URL** (`url`): base URL of the ePO console, for example `https://epo.example.com:8443`.
    - **Username** (`username`): the ePO account from the steps above.
    - **Password** (`password`): the password for that account.
