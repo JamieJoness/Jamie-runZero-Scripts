@@ -24,11 +24,55 @@ Run it on a schedule and it behaves as an incremental sync:
   downloads in total; the script budgets from each task's recorded data size and stops cleanly at
   the configured per-run limit (2 GB by default), leaving the rest for the next scheduled run.
 
+## Where to run it
+
+The script is one-way but not one-place. `src_url` and `dst_url` decide which console is read
+and which is written; where the task runs decides only what the script can reach. For a
+SaaS-to-self-hosted sync, set it up on the **self-hosted console** and run it from an **Explorer
+connected to that console**:
+
+- An on-prem Explorer reaches the self-hosted console at its internal address and reaches
+  `console-eu.runzero.com` over ordinary outbound HTTPS, so both ends are in view. A custom
+  integration task running on an Explorer may connect to private addresses.
+- Setting it up on the SaaS console does not work for an internal destination. A task run on
+  the console itself (no Explorer selected) blocks private and link-local addresses, so an
+  internal `dst_url` fails with `connections to internal IP address ... are not allowed`. It would
+  only work from an on-prem Explorer enrolled to the SaaS console, which is an extra Explorer for
+  no gain.
+- Nothing on the SaaS side ever connects to the self-hosted console. The script pulls from the
+  source and pushes to the destination from wherever it runs, so the self-hosted console needs no
+  public address, no inbound firewall rule, and no DNS entry outside the network.
+
+`dst_url` is therefore the self-hosted console's own address as seen from inside the network:
+the `RUNZERO_CONSOLE` value in `/etc/runzero/config` (for example `https://runzero.corp.example`
+or `https://10.0.4.20`), which is the same URL users browse to and Explorers enrol against.
+
+Self-hosted consoles usually serve a self-signed or private-CA certificate that the Explorer will
+not trust by default. The destination TLS options on the credential handle this without touching
+the SaaS side:
+
+- **Additional CA certs (PEM)** (`dst_tls_ca_cert`): paste the private CA, or the console's own
+  certificate when it is self-signed. `dst_url` must then use a hostname or IP the certificate
+  names.
+- Or pin the certificate: enable **Disable TLS validation** (`dst_tls_disable_validation`) *and*
+  set **Pinned peer cert SHA-256** (`dst_tls_peer_hash`) to the console certificate's SHA-256
+  fingerprint (`openssl s_client -connect <host>:443 </dev/null | openssl x509 -fingerprint -sha256 -noout`).
+  With the pin set, disabling validation only skips the CA chain check; any certificate other
+  than the pinned one is still refused.
+- **Disable TLS validation** on its own is the last resort, not the first step.
+
+The self-hosted console must be on a release at or above the script's `minVersion`
+(`5.1.260818.0`): the Explorers it deploys are the ones that run the script, and an older
+Explorer refuses it with an upgrade message.
+
 ## Requirements
 
 ### runZero Requirements
 
-- Superuser access to the [Custom Integrations configuration](https://console.runzero.com/custom-integrations) in runZero.
+- Superuser access to **Custom Integrations** on the console the task will run from — the
+  self-hosted console for a SaaS-to-self-hosted sync (see [Where to run it](#where-to-run-it)).
+- An Explorer connected to that console with a route to both `dst_url` and the source console
+  (outbound HTTPS to `console-eu.runzero.com` or `console.runzero.com`).
 
 ### API Requirements
 
@@ -56,7 +100,8 @@ source and the destination are two runZero consoles.
 
 1. **Obtain Required IDs and Tokens**
 
-   For each console — the source and the destination — do the following:
+   Do this on each console: the **source** (`https://console-eu.runzero.com` for an EU tenant)
+   for the source values, and the **self-hosted console** for the destination values.
 
    - Go to **Organizations** and click the organization. Its ID is shown on the
      organization's information page, and also appears as the `_oid` query parameter in the
@@ -84,35 +129,35 @@ source and the destination are two runZero consoles.
 
 
 3. **Create the Custom Integration**
-   - Go to [runZero Custom Integrations](https://console.runzero.com/custom-integrations/new).
+   - On the **self-hosted console**, go to **Custom Integrations** (`/custom-integrations/new`).
    - Add a Name and Icon for the integration (e.g., "Task Sync").
    - Toggle `Enable custom integration script` to input the finalized script.
    - Click `Validate` to ensure it has valid syntax.
    - Click `Save` to create the Custom Integration.
 
 4. **Create the Credential for the Custom Integration**
-   - Go to [runZero Credentials](https://console.runzero.com/credentials).
+   - On the **self-hosted console**, go to **Credentials** (`/credentials`).
    - Select `<name of custom integration> Script Secrets`.
-   - **Source runZero URL** (`src_url`): optional; defaults to `https://console.runzero.com`. Set it to `https://console-eu.runzero.com` for an EU tenant.
-   - **Source org ID** (`src_org_id`): the organization to read tasks from.
+   - **Source runZero URL** (`src_url`): the SaaS console, `https://console-eu.runzero.com` for an EU tenant. Defaults to `https://console.runzero.com`.
+   - **Source org ID** (`src_org_id`): the SaaS organization to read tasks from.
    - **Source task search filter** (`src_task_search_filter`): optional; which tasks to sync. Default `type:scan`.
-   - **Destination runZero URL** (`dst_url`): optional; defaults to `https://console.runzero.com`. Set it to your self-hosted console, e.g. `https://runzero.internal.example.com`.
-   - **Destination org ID** (`dst_org_id`): the organization to import into.
+   - **Destination runZero URL** (`dst_url`): the self-hosted console's own address — the `RUNZERO_CONSOLE` value from `/etc/runzero/config`, e.g. `https://runzero.corp.example` or `https://10.0.4.20`. It is reached from the Explorer, so an internal address is expected.
+   - **Destination org ID** (`dst_org_id`): the self-hosted organization to import into.
    - **Destination site ID** (`dst_site_id`): optional; leave blank to mirror sites by name.
    - **Max MB of task data per run** (`max_mb_per_run`): optional; default 2048. See [Optional Settings](#optional-settings).
    - **Hide source tasks after sync** (`hide_tasks_on_sync`): optional; default off.
-   - **Source API token** (`src_api_token`): the `OT` token for the source organization.
-   - **Destination API token** (`dst_api_token`): the `OT` token for the destination organization.
-   - TLS and HTTP options are separate for each side, prefixed `src_tls_` / `dst_tls_` and `src_http_` / `dst_http_`, so a self-hosted console with a private certificate can be configured without loosening anything on the other end.
+   - **Source API token** (`src_api_token`): the `OT` token from the SaaS organization.
+   - **Destination API token** (`dst_api_token`): the `OT` token from the self-hosted organization.
+   - TLS and HTTP options are separate for each side, prefixed `src_tls_` / `dst_tls_` and `src_http_` / `dst_http_`. Set the destination TLS options described in [Where to run it](#where-to-run-it) when the self-hosted console's certificate is self-signed or from a private CA; the source side keeps full validation of the SaaS certificate.
 
 
 5. **Create the Custom Integration Task**
-   - Go to [runZero Ingest](https://console.runzero.com/ingest/custom/).
+   - On the **self-hosted console**, go to **Ingest** → **Custom integration** (`/ingest/custom/`).
    - Select the Credential and Custom Integration created in the previous steps.
    - Update the task schedule to recur at the desired timeframes. An hourly schedule turns a
      large first migration into a series of batches and then keeps the destination current.
-   - Select the Explorer you'd like the Custom Integration to run from. It must reach both
-     consoles; for a SaaS-to-self-hosted sync that is usually an Explorer on the self-hosted side.
+   - Select the Explorer the task runs from. Do **not** leave the selection empty: a task run
+     on the console itself cannot reach private addresses, so it would never reach `dst_url`.
    - Click `Save` to kick off the first task.
 
 ## Optional Settings
@@ -132,7 +177,9 @@ source and the destination are two runZero consoles.
 ## Running it from the command line
 
 The runZero Explorer binary runs a script directly, which is the fastest way to confirm
-both consoles are reachable and both tokens work before scheduling it. `--kwargs` is
+both consoles are reachable and both tokens work before scheduling it. Run it from a machine
+inside the network — the on-prem Explorer host is the natural choice — so that `dst_url`
+resolves the same way it will for the scheduled task. `--kwargs` is
 repeated once per parameter. Note that this integration's script is `runzero-task-sync.star`:
 
 ```bash
@@ -248,6 +295,8 @@ library, `runzero-scan-passive-assets` and `runzero-vulnerability-workflow`, dec
 
 ## Troubleshooting
 
+- **`connections to internal IP address ... are not allowed`**: the task ran on the console itself rather than on an Explorer, or on a console-hosted run of the SaaS console. Set it up on the self-hosted console and select an on-prem Explorer for the task (see [Where to run it](#where-to-run-it)).
+- **`x509: certificate signed by unknown authority` against `dst_url`**: the self-hosted console's certificate is self-signed or from a private CA. Set `dst_tls_ca_cert`, or pin it with `dst_tls_disable_validation` plus `dst_tls_peer_hash`.
 - **`failed to get tasks` / `failed to list destination tasks`**: the token or organization ID for that side is wrong, the token is an export (`ET`) token, or the console is not reachable from the Explorer. The side named in the message is the one to check.
 - **`destination site ... not found`**: `dst_site_id` is not a site in `dst_org_id`. Fix the ID, or clear it to mirror sites by name.
 - **`Failed to create destination site`**: the destination account is not licensed to create sites, or the token cannot write to inventory. Create the site by hand with the source site's exact name, or set `dst_site_id`.
