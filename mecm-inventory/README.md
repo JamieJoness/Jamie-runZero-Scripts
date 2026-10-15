@@ -20,9 +20,9 @@ setting makes the integration enrichment-only.
 Setting it up is four steps, described under [Steps](#steps): a read-only
 login on the SQL Server that holds the MECM site database (or reuse the one the
 native MECM integration already uses), the custom integration in runZero, a
-**Custom Integration Script Secrets** credential holding the connection details
-and import options, and a scheduled task on an Explorer that can reach the
-database.
+credential of the type runZero creates for that integration (**mecm-inventory
+Secrets**) holding the connection details and import options, and a scheduled
+task on an Explorer that can reach the database.
 
 ## What the native MECM integration already covers
 
@@ -227,8 +227,9 @@ clearer error messages than a task log will.
    **Validate**, then **Save**.
 
 The script carries its own `CONFIG` block, so runZero now knows which fields
-this integration needs and builds the credential form from it. The **Credential
-fields** disclosure on the integration page lists them.
+this integration needs, builds the credential form from them, and adds a
+credential type named after the integration to the Credentials page. The
+**Credential fields** disclosure on the integration page lists the fields.
 
 ### Step 3: Create the credential
 
@@ -237,9 +238,12 @@ the task only points at it.
 
 1. Go to **[Credentials](https://console.runzero.com/credentials) → Add
    Credential**.
-2. Choose the type **Custom Integration Script Secrets**.
-3. Give it a name (for example `MECM site database`) and select the
-   `mecm-inventory` integration. The form shows this integration's fields:
+2. Open the **Credential type** list. Every custom integration in your console
+   appears there as its own entry named after it; choose **mecm-inventory
+   Secrets** (the name you gave the integration in Step 2, followed by
+   *Secrets*). Picking it is what ties the credential to this script, and the
+   form below changes to this integration's fields.
+3. Give it a name (for example `MECM site database`) and fill in the fields:
 
    | Field | Default | What to enter |
    | --- | --- | --- |
@@ -491,9 +495,9 @@ rather than silently truncating if it ever trips.
 ## Troubleshooting
 
 - **Task save fails naming parameter keys** (`host`, `username`, …) — the
-  selected credential is missing a required field, or is not a *Custom
-  Integration Script Secrets* credential for this integration. Edit the
-  credential, not the task.
+  selected credential is missing a required field, or was created under a
+  different integration's type (its type must be **mecm-inventory Secrets**).
+  Edit the credential, not the task.
 - **`Login failed for user`** — wrong password; the login exists on the
   instance but has no user in the site database (`CREATE USER … FOR LOGIN`);
   or the instance is in Windows Authentication only mode and rejects every SQL
