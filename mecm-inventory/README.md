@@ -17,6 +17,13 @@ carries the same correlators the native integration imports (hostnames, MAC
 addresses, IP addresses from MECM's discovery data), and the recommended task
 setting makes the integration enrichment-only.
 
+Setting it up is four steps, described under [Steps](#steps): a read-only
+login on the SQL Server that holds the MECM site database (or reuse the one the
+native MECM integration already uses), the custom integration in runZero, a
+**Custom Integration Script Secrets** credential holding the connection details
+and import options, and a scheduled task on an Explorer that can reach the
+database.
+
 ## What the native MECM integration already covers
 
 The native integration (**Tasks → Integrations → MECM**) imports one row per
@@ -71,68 +78,176 @@ The connection identifies itself to SQL Server as `runZero-mecm-inventory` (the
 `app name` connection property), so it is easy to spot in `sp_who2`, Query Store
 or Extended Events.
 
-## runZero requirements
+## Why this needs a SQL Server login
 
-- Superuser access to create the custom integration and the scheduled task.
+Everything Configuration Manager knows about a device — its hardware
+inventory, installed software, the collections it belongs to, the updates it
+still needs — lives in **one Microsoft SQL Server database, the site database**.
+It is normally named `CM_` followed by the three-character site code, for
+example `CM_PS1`. The Configuration Manager console and MECM's own reports are
+front ends onto that database; they hold no data of their own.
+
+Other products read this inventory the way MECM's own reports do: by
+connecting to that SQL Server and reading the **reporting views**
+(`v_R_System`, `v_GS_COMPUTER_SYSTEM`, …) Microsoft documents for the purpose.
+That is exactly how runZero's native MECM integration works — its credential
+type is *MECM Database Connection String* — and it is exactly what this
+integration does. (MECM also has a REST administration service, but it is built
+for console and PowerShell access to one object at a time, not for reporting
+across every device.) From SQL Server's point of view this integration is a
+reporting tool running read-only `SELECT` statements.
+
+Connecting to SQL Server needs an account **on the SQL Server itself**, called a
+*login*. It is separate from your Configuration Manager console roles, your
+Windows account and your runZero account: SQL Server alone decides who may read
+the database, and nobody else can grant that. So the one piece of setup outside
+runZero is giving runZero a read-only login on the site database, and the only
+reason it has to be done *on the SQL Server* is that that is where accounts for
+that database are created.
+
+### If you already run runZero's native MECM integration
+
+You have already done this once. The connection string entered for that
+credential (runZero does not show it back once saved, so take it from wherever
+it was recorded, or ask whoever set that integration up) looks like one of
+these:
+
+```text
+Server=sqlhost,1433;Database=CM_PS1;User Id=svc_runzero;Password=...;
+sqlserver://svc_runzero:...@sqlhost:1433?database=CM_PS1
+```
+
+`Server`/`sqlhost:1433` is **SQL Server host** and **Port**, `Database` is
+**Site database**, and `User Id`/`Password` are **Username** and **Password**.
+That login already reads the same database, so it works here unchanged and you
+can skip straight to [Step 2](#step-2-add-the-custom-integration-to-runzero).
+Create a new login only if you want this integration to have its own account.
+
+## Requirements
+
+**runZero**
+
+- Superuser access, to create the custom integration, the credential and the
+  scheduled task.
 - runZero platform 5.1.260818.0 or newer (the script's `minVersion`).
-- An Explorer that can reach the SQL Server instance hosting the site database
-  (TCP 1433 by default). The script connects to internal addresses, so it must
-  run on an Explorer, not as a Console-hosted task.
+- An Explorer with a network path to the SQL Server instance (TCP 1433 by
+  default). The site database is on your internal network, so the task must run
+  on an Explorer; a Console-hosted task cannot reach it.
 
-## MECM and SQL Server requirements
+**Configuration Manager**
 
-- Configuration Manager current branch with the standard hardware inventory
-  classes enabled (Computer System, System Enclosure, PC BIOS, Processor, X86
-  PC Memory, Logical Disk, Disk, Operating System). These are on by default.
-  Software needs either the **Installed Software (Asset Intelligence)** class or
-  the **Add/Remove Programs** classes; both are on by default.
-- A SQL login with `SELECT` on the site database views. MECM's own reporting
-  role `smsschm_users` grants exactly that and is the least-privilege choice;
-  `db_datareader` also works.
+- Current branch, with the standard hardware inventory classes enabled
+  (Computer System, System Enclosure, PC BIOS, Processor, X86 PC Memory,
+  Logical Disk, Disk, Operating System). These are on by default. Software
+  needs either the **Installed Software (Asset Intelligence)** class or the
+  **Add/Remove Programs** classes; both are on by default.
+- Know where the site database is. In the Configuration Manager console,
+  **Administration → Site Configuration → Servers and Site System Roles** lists
+  the server holding the **Site database server** role; the database is
+  `CM_<site code>` unless it was renamed at install. If the database is on a
+  *named* instance (`SERVER\INSTANCE`), use that instance's TCP port as the
+  **Port** — this integration connects to a host and port and does not resolve
+  instance names, so a dynamic port should be pinned to a static one in SQL
+  Server Configuration Manager.
+
+**SQL Server**
+
+- A login that can read the site database views: a member of the database
+  role `smsschm_users` — the role MECM itself puts its reporting account in,
+  which gives read access to the reporting views and no write access — or of
+  `db_datareader`. [Step 1](#step-1-create-the-sql-server-login) creates one.
+- For a SQL Server login (the default here), the instance must allow **SQL
+  Server and Windows Authentication mode** (Mixed Mode). An instance set to
+  Windows Authentication only rejects every SQL login regardless of password.
+  Windows authentication with a `DOMAIN\user` login works over NTLM from a
+  Linux Explorer in principle, but that path has not been exercised by this
+  integration's tests; verify it on your site before relying on it.
 - A server certificate the Explorer trusts, or **Trust the server certificate**
-  enabled for the default self-signed certificate (see the parameter notes).
-- Windows authentication from a Linux Explorer is supported by the driver over
-  NTLM using `DOMAIN\user` as the username. This path has not been exercised by
-  the fixture tests; verify it on your site before relying on it.
+  enabled when the instance still uses the self-signed certificate SQL Server
+  generates at install (see the credential fields in Step 3).
 
 ## Steps
 
-### SQL Server login
+### Step 1: Create the SQL Server login
 
-Run on the SQL Server instance that hosts the site database (replace the site
-database name and choose a strong password; store it only in runZero):
+Skip this if you are reusing the native integration's login.
+
+"Run this on the SQL Server" means: whoever administers that SQL Server (your
+DBA, or the MECM administrator who installed the site) opens **SQL Server
+Management Studio** (SSMS) or Azure Data Studio, connects to the instance that
+hosts the site database with an account that has `sysadmin` rights on it, opens
+a **New Query** window, pastes the statements below and clicks **Execute**. It
+runs once and creates one account; nothing is installed and nothing of
+runZero's ever runs on the SQL Server.
 
 ```sql
+-- 1. An account on the SQL Server instance. Choose a strong password and
+--    store it only in the runZero credential.
 USE [master];
 CREATE LOGIN [svc_runzero_mecm] WITH PASSWORD = N'<strong password>', CHECK_POLICY = ON;
 GO
+-- 2. Let that account into the site database (change CM_PS1 to yours).
 USE [CM_PS1];
 CREATE USER [svc_runzero_mecm] FOR LOGIN [svc_runzero_mecm];
+-- 3. Read access to the reporting views, through the role MECM uses for its
+--    own reporting account. It cannot write or change anything.
 ALTER ROLE [smsschm_users] ADD MEMBER [svc_runzero_mecm];
 GO
 ```
 
-The login needs nothing else: no write permission, no access to other databases,
-no server roles.
+The login needs nothing else: no write permission, no access to other
+databases, no server roles. For Windows authentication instead, replace the
+first statement with `CREATE LOGIN [CORP\svc_runzero_mecm] FROM WINDOWS;`, use
+the same `CORP\...` name in the other two, and enter `CORP\svc_runzero_mecm` as
+the username in runZero.
 
-### runZero configuration
+Then check it works, still in SSMS: **Connect → Database Engine**, set
+*Authentication* to **SQL Server Authentication**, sign in as the new login and
+run:
+
+```sql
+USE [CM_PS1];
+SELECT ThisSiteCode FROM v_Identification;
+SELECT COUNT(*) AS devices FROM v_R_System;
+```
+
+The first query returns your site code — it is the first thing the integration
+reads — and the second a device count. If either fails, fix it here; SSMS shows
+clearer error messages than a task log will.
+
+### Step 2: Add the custom integration to runZero
 
 1. In the [runZero console](https://console.runzero.com/custom-integrations),
    go to **Account → Custom integrations → Add custom integration**.
 2. Name it exactly `mecm-inventory`. **The saved queries below use this name as
    the attribute namespace** (`@mecm-inventory.device.…`); a different name
    means editing every query to match.
-3. Paste the contents of [mecm-inventory.star](./mecm-inventory.star) into the
-   script body and save.
-4. Go to **Tasks → Integrations**, select this integration, and configure:
+3. Toggle **Enable custom integration script**, paste the contents of
+   [mecm-inventory.star](./mecm-inventory.star) into the editor, click
+   **Validate**, then **Save**.
 
-   | Parameter | Default | Notes |
+The script carries its own `CONFIG` block, so runZero now knows which fields
+this integration needs and builds the credential form from it. The **Credential
+fields** disclosure on the integration page lists them.
+
+### Step 3: Create the credential
+
+The credential is where the connection details and the import options live;
+the task only points at it.
+
+1. Go to **[Credentials](https://console.runzero.com/credentials) → Add
+   Credential**.
+2. Choose the type **Custom Integration Script Secrets**.
+3. Give it a name (for example `MECM site database`) and select the
+   `mecm-inventory` integration. The form shows this integration's fields:
+
+   | Field | Default | What to enter |
    | --- | --- | --- |
-   | SQL Server host, Port | — / `1433` | The instance that hosts the site database. |
-   | Username, Password | — | The login created above. The password is encrypted at rest and never logged. |
+   | SQL Server host, Port | — / `1433` | The server holding the **Site database server** role, and the instance's TCP port. |
+   | Username, Password | — | The login from Step 1, or the native integration's. The password is encrypted at rest and never logged. |
    | Site database | — | `CM_<site code>`, e.g. `CM_PS1`. |
    | Require TLS encryption | on | Leave on. |
-   | Trust the server certificate | off | Turn on when the instance uses the self-signed certificate SQL Server generates at install; otherwise the TLS handshake fails before login. |
+   | Trust the server certificate | off | Turn on when the instance uses the self-signed certificate SQL Server generates at install; otherwise the TLS handshake fails before login. The session stays encrypted; only certificate validation is skipped. |
    | Query timeout (seconds) | `60` | Per statement. |
    | Device collection ID | empty | Restrict the import to one device collection, e.g. `PS100012`. Use it for the first test run. |
    | Installed software source | `installed_software` | `add_remove_programs` if Asset Intelligence inventory is disabled on your site; `none` to skip software. |
@@ -141,24 +256,37 @@ no server roles.
    | Missing updates per device | `99` | Cap per asset, most severe first; the true total is in `missingUpdates.count`. |
    | Devices per page | `100` | Devices read per round of queries. |
 
-5. Tick **Exclude assets that cannot be merged into an existing asset**. This
+4. To let other organizations use it, select **Make this a global credential**.
+5. Save the credential.
+
+### Step 4: Create and run the task
+
+1. Go to **Tasks → Integrate → Custom Scripts** (or use **Save & create task**
+   on the integration page).
+2. Select the `mecm-inventory` integration and the credential from Step 3.
+   Saving checks the pair: the script must compile and the credential must hold
+   every required field, or the save fails naming the missing parameter keys.
+3. Choose an Explorer that can reach the SQL Server, and the site to add any
+   new assets to.
+4. Tick **Exclude assets that cannot be merged into an existing asset**. This
    makes the integration enrichment-only: a device MECM knows but runZero has
    never seen by hostname, MAC or IP is skipped instead of becoming a new,
    sparse asset. Leave it unticked only if you want MECM-only devices to appear
    as new assets.
-6. Choose the site and an Explorer that can reach the SQL Server, and schedule
-   it **daily**, a few hours after your hardware inventory cycle. Inventory in
-   MECM changes at most once per inventory cycle (default every 7 days for
-   hardware), so more frequent runs add database load without adding data.
-7. Run the task once and open its log. A healthy run ends with a line like
-   `mecm-inventory: site PS1: 1234 devices read, 1230 assets reported, 2
-   placeholder records skipped, 2 devices without a hostname, MAC or IP skipped,
-   187654 software records and 3120 missing updates attached`.
+5. Schedule it **daily**, a few hours after your hardware inventory cycle.
+   Inventory in MECM changes at most once per inventory cycle (default every 7
+   days for hardware), so more frequent runs add database load without adding
+   data.
+6. Activate the task, run it once and open its log. A healthy run ends with a
+   line like `mecm-inventory: site PS1: 1234 devices read, 1230 assets
+   reported, 2 placeholder records skipped, 2 devices without a hostname, MAC
+   or IP skipped, 187654 software records and 3120 missing updates attached`.
 
 ### Validation on a small test set
 
-1. For the first run set **Device collection ID** to a small collection you
-   know (a pilot collection of a dozen devices), then clear it once satisfied.
+1. For the first run set **Device collection ID** on the credential to a small
+   collection you know (a pilot collection of a dozen devices), then clear it
+   once satisfied.
 2. Search **Assets** for `custom_integration:mecm-inventory` — every asset the
    task touched.
 3. Open two or three of them. Under **Attributes**, the `mecm-inventory` section
@@ -362,29 +490,38 @@ rather than silently truncating if it ever trips.
 
 ## Troubleshooting
 
-- **`Login failed for user`** — wrong password, or the login exists on the
-  instance but has no user in the site database (`CREATE USER … FOR LOGIN`).
+- **Task save fails naming parameter keys** (`host`, `username`, …) — the
+  selected credential is missing a required field, or is not a *Custom
+  Integration Script Secrets* credential for this integration. Edit the
+  credential, not the task.
+- **`Login failed for user`** — wrong password; the login exists on the
+  instance but has no user in the site database (`CREATE USER … FOR LOGIN`);
+  or the instance is in Windows Authentication only mode and rejects every SQL
+  login (SSMS: right-click the server → **Properties → Security**).
 - **TLS handshake error at connect** — the instance presents the self-signed
   certificate SQL Server generates at install. Install a certificate the
-  Explorer trusts, or enable **Trust the server certificate**.
+  Explorer trusts, or enable **Trust the server certificate** on the credential.
 - **`The SELECT permission was denied`** — the user is not in `smsschm_users`
   (or `db_datareader`).
 - **`view … is not present or not readable`** — the hardware inventory class
   behind that view is disabled in client settings (**Administration → Client
   Settings → Hardware Inventory → Set Classes**), or the login cannot see it.
-  For software, switch **Installed software source** to the class your site
-  collects.
+  For software, switch **Installed software source** on the credential to the
+  class your site collects.
 - **New hostname-only assets instead of enrichment** — the MECM record's
   NetBIOS name/FQDN/MAC/IP did not match an existing asset. Check the asset's
   `hostnames` and `macAddresses` against what runZero holds for that device,
-  and turn on the exclude toggle so unmatched records are skipped.
+  and turn on **Exclude assets that cannot be merged into an existing asset**
+  on the task so unmatched records are skipped.
 - **A VM shows as `Desktop`** — the record is not flagged `Is_Virtual_Machine0`
   in MECM, so its hypervisor-reported chassis was used. runZero's fingerprinting
   from other sources still outranks a custom integration's type when it has
   one.
 - **Software or update counts look capped** — `software.truncated` or
-  `missingUpdates.truncated` is `true`; raise the per-device cap.
-- **`one page returned 1000000 rows`** — lower **Devices per page**.
+  `missingUpdates.truncated` is `true`; raise the per-device cap on the
+  credential.
+- **`one page returned 1000000 rows`** — lower **Devices per page** on the
+  credential.
 
 ## Known limitations
 
