@@ -57,10 +57,21 @@ load('runzero.types', 'ImportAsset', 'to_custom_attributes')
 load('net', 'network_interface')
 load('http', 'get_json')
 load('kwargs', 'get_url_base', 'get_http_options', 'get_string')
+load('time', 'parse_ts')
 
 API_VERSION     = '1.4'
 SCAN_ENDPOINT   = '/api/' + API_VERSION + '/inventory/scancomputers'
 PAGE_LIMIT      = 1000
+
+# Endpoint Central reports every timestamp on a scancomputers row as Unix epoch
+# milliseconds: agent_installed_on, agent_last_contact_time, last_sync_time,
+# last_successful_scan, computer_status_update_time, process_start_time, and
+# process_end_time among them. Each is carried through untouched, and a sibling
+# attribute named <key>StandardTime carries the human-readable UTC form, e.g.
+# agent_last_contact_time=1792403674000 gains
+# agent_last_contact_timeStandardTime="19-10-2026 09:54:34 UTC".
+STANDARD_TIME_SUFFIX = 'StandardTime'
+STANDARD_TIME_LAYOUT = '02-01-2006 15:04:05'   # Go layout for DD-MM-YYYY HH:MM:SS
 
 # The foreign-id namespace used when server_scope is set.
 VENDOR          = 'manage-engine-endpoint-central'
@@ -105,6 +116,38 @@ def retrieved_of(reported, total):
     if total == None:
         return 'Retrieved {} assets; the API does not report a total'.format(reported)
     return 'Retrieved {}/{} available assets'.format(reported, total)
+
+def is_millis_timestamp(value):
+    """True when value is a 13-digit integer, or a string of 13 digits, which is
+    the shape of every epoch-millisecond timestamp Endpoint Central reports.
+    Thirteen digits spans the years 2001-2286, so a status code, a count, a
+    10-digit epoch in seconds, and the '-1' and '--' placeholders Endpoint
+    Central writes for "never" all fall outside it and are left alone."""
+    if type(value) == 'int':
+        digits = str(value)
+    elif type(value) == 'string':
+        digits = value.strip()
+    else:
+        return False
+    return len(digits) == 13 and digits.isdigit()
+
+def standard_time(value):
+    """Render an epoch-millisecond value as 'DD-MM-YYYY HH:MM:SS UTC', or None
+    when the value is not one.
+
+    parse_ts answers None rather than raising on anything it cannot read, so a
+    malformed value on one row cannot abort the task. Clamping is turned off
+    because this is a display attribute, not an asset first/last-seen time: a
+    timestamp ahead of the Explorer's clock should be shown as the server
+    reported it, not silently moved to now. The explicit UTC conversion keeps
+    the string the same whatever timezone the Explorer runs in.
+    """
+    if not is_millis_timestamp(value):
+        return None
+    stamp = parse_ts(value, unit='ms', clamp_to_now=False)
+    if stamp == None:
+        return None
+    return stamp.in_location('UTC').format(STANDARD_TIME_LAYOUT) + ' UTC'
 
 # Endpoint Central writes this literal into ip_address and mac_address slots
 # that have no value: an adapter with a MAC but no address, or the other way
@@ -227,12 +270,17 @@ def build_assets(devices, scope):
         # build networkInterfaces
         net_ifaces = build_network_interfaces(d)
 
-        # everything else goes into customAttributes (truncate to 1023 chars)
+        # everything else goes into customAttributes (truncate to 1023 chars);
+        # an epoch-millisecond value also gains a <key>StandardTime sibling
+        # holding its human-readable UTC form, with the raw value kept as-is.
         custom = {}
         for k, v in d.items():
             if k in ('resource_id','id','resource_name','ip_address','mac_address'):
                 continue
             custom[k] = str(v)[:1023]
+            readable = standard_time(v)
+            if readable:
+                custom[k + STANDARD_TIME_SUFFIX] = readable
 
         assets.append(
             ImportAsset(

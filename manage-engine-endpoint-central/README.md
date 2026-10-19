@@ -7,11 +7,13 @@ network adapter Endpoint Central knows about (MAC and IP, per adapter), and the
 rest of the row as custom attributes.
 
 This is a copy of the `manage-engine-endpoint-central` script from the
-runZero custom integrations library, with one fix on top: **multi-NIC machines
-are now imported with all of their MAC addresses.** See
-[The multi-NIC fix](#the-multi-nic-fix) for what was wrong and why it matters.
+runZero custom integrations library, with two changes on top: **multi-NIC
+machines are now imported with all of their MAC addresses** (see
+[The multi-NIC fix](#the-multi-nic-fix) for what was wrong and why it matters),
+and every epoch-millisecond timestamp gains a human-readable
+[`<key>StandardTime`](#standardtime-attributes) attribute.
 The older top-level `manage_engine_endpoint_custom_integration.star` in this
-repository (hardcoded host, no `CONFIG` block) has the bug and should be
+repository (hardcoded host, no `CONFIG` block) has the MAC bug and should be
 considered superseded by this folder.
 
 ## On-prem only
@@ -94,11 +96,33 @@ runzero script --filename manage-engine-endpoint-central/manage-engine-endpoint-
 | `resource_id` (fallback `id`) | foreign id, optionally scoped by `server_scope` |
 | `resource_name` | hostname |
 | `mac_address`, `ip_address` | one network interface **per adapter**; see below |
-| everything else on the row (`os_name`, `os_version`, `domain_netbios_name`, `agent_version`, `agent_last_contact_time`, `last_successful_scan`, `scan_status`, `servicetag`, …) | custom attributes, each truncated to 1023 characters |
+| `agent_installed_on`, `agent_last_contact_time`, `last_sync_time`, `last_successful_scan`, `computer_status_update_time`, `process_start_time`, `process_end_time` (epoch milliseconds) | custom attributes as reported, **plus** a `<key>StandardTime` sibling in human-readable UTC; see below |
+| everything else on the row (`os_name`, `os_version`, `domain_netbios_name`, `agent_version`, `scan_status`, `servicetag`, …) | custom attributes, each truncated to 1023 characters |
 
 Pagination walks `page`/`pagelimit=1000` until a short or empty page, stops if
 the server repeats a page, and is capped by `CONFIG["maxPages"]`. Rows that are
 not objects or have no `resource_id`/`id` are skipped with a log line.
+
+### StandardTime attributes
+
+Endpoint Central reports every timestamp as Unix epoch **milliseconds**, which
+is unreadable in the asset view and unusable in a report without conversion.
+Each such value is kept as-is and also rendered into a sibling attribute named
+`<key>StandardTime`, formatted `DD-MM-YYYY HH:MM:SS UTC`:
+
+| attribute | value |
+| --- | --- |
+| `agent_last_contact_time` | `1792403674000` |
+| `agent_last_contact_timeStandardTime` | `19-10-2026 09:54:34 UTC` |
+
+A value is treated as a millisecond timestamp when it is a 13-digit integer or
+digit string. That range covers 2001–2286, so the `-1` and `--` placeholders
+Endpoint Central writes for "never", status codes, counts and build numbers are
+never converted. The conversion is always to UTC regardless of the Explorer's
+local timezone, and a future-dated value is shown as reported rather than
+clamped — these are display attributes, not the asset's first/last-seen times.
+These are the same attribute names and format the earlier script in this
+repository produced, so existing searches and reports keep working.
 
 ## The multi-NIC fix
 
