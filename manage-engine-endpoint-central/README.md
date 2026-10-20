@@ -7,11 +7,14 @@ network adapter Endpoint Central knows about (MAC and IP, per adapter), and the
 rest of the row as custom attributes.
 
 This is a copy of the `manage-engine-endpoint-central` script from the
-runZero custom integrations library, with two changes on top: **multi-NIC
+runZero custom integrations library, with three changes on top: **multi-NIC
 machines are now imported with all of their MAC addresses** (see
 [The multi-NIC fix](#the-multi-nic-fix) for what was wrong and why it matters),
-and every epoch-millisecond timestamp gains a human-readable
-[`<key>StandardTime`](#standardtime-attributes) attribute.
+every epoch-millisecond timestamp gains a human-readable
+[`<key>StandardTime`](#standardtime-attributes) attribute, and **a rejected
+or expired token now fails the task with the server's error** instead of
+reporting a successful run with zero assets (see
+[Troubleshooting](#troubleshooting)).
 The older top-level `manage_engine_endpoint_custom_integration.star` in this
 repository (hardcoded host, no `CONFIG` block) has the MAC bug and should be
 considered superseded by this folder.
@@ -181,3 +184,59 @@ hostname, so the platform's default match behaviour (all match and break
 dimensions on) applies. `resource_id` is stable for the life of the inventory
 record; a machine removed from Endpoint Central and re-enrolled gets a new one,
 and will appear as a new asset until the old one ages out.
+
+## Troubleshooting
+
+### The task finishes in about a second with 0 assets and no error
+
+Endpoint Central's on-prem API reports an invalid or expired auth token — and
+most other request-level failures — as **HTTP 200** with a body of
+
+```json
+{"status":"error","error_code":1001,"error_description":"...","message_version":"1.0","message_type":"scancomputers"}
+```
+
+and no `message_response` at all. The library version of the script checks
+only the HTTP status, so that body read as an inventory with no computers: one
+request, `script: No devices returned`, exit 0, and a task that looked like a
+successful import of an empty estate. That is exactly what a first run with a
+freshly created credential produced in the field.
+
+This version checks the body's `status` and **ends the task in error** with the
+server's own `error_code` and `error_description` in the task log, as a red task
+error on the integration page. If you see it:
+
+1. **Check the token value in the credential.** It must be the bare
+   `auth_token` from `POST /api/1.4/desktop/authentication` — no `Bearer` or
+   `Zoho-oauthtoken` prefix (the field is named `oauth_token`, which invites
+   one; the script warns in the log when it sees one), and not the key from the
+   console's *API key generation* page. Leading and trailing whitespace from a
+   paste is stripped automatically.
+2. **Check the token still works** with the `curl` under
+   [Requirements](#requirements), using the exact value from the credential.
+   The body's `error_description` says why it was rejected. The on-prem token's
+   lifetime is not documented; if it has expired, re-run the authentication
+   call and update the credential.
+3. **Check the account** behind the token has Inventory read access. An
+   account without it can answer with a `status: success` page whose
+   `scancomputers` list is empty — the task then succeeds with 0 assets and
+   logs `the server reports no scanned computers for this account`.
+
+Every run also logs the URL it reads, one line per page
+(`page N returned M computers (status=success, server total=T)`), and a final
+`imported N assets from P page(s)` line, so a truncated or empty import is
+visible in the task log without a data export. A 2xx response of any other
+unexpected shape — an empty body, a JSON array, a `message_response` without
+`scancomputers` — also fails the task, quoting the top-level keys and the first
+600 characters of the body.
+
+### `runzero script --validate` fails
+
+The CLI's `--validate` smoke test answers every request from a generic dummy
+server with an empty JSON array, which no Endpoint Central build ever returns,
+and this script treats it as an unreadable inventory and fails — the message
+says so explicitly. The console's **Validate** button only compiles the script
+and is unaffected. To exercise the script locally, run it against a fixture
+that answers `/api/1.4/inventory/scancomputers` with a real-shaped page, for
+example the fixture harness in the custom integrations library
+(`tests/harness`) with this script path in the scenario's `script` field.

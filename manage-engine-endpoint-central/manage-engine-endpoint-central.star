@@ -58,6 +58,7 @@ load('net', 'network_interface')
 load('http', 'get_json')
 load('kwargs', 'get_url_base', 'get_http_options', 'get_string')
 load('time', 'parse_ts')
+load('json', 'encode')
 
 API_VERSION     = '1.4'
 SCAN_ENDPOINT   = '/api/' + API_VERSION + '/inventory/scancomputers'
@@ -96,18 +97,23 @@ def page_signature(devices):
     return ','.join(ids)
 
 def reported_total(body):
-    """Endpoint Central returns a metadata object alongside message_response on
-    the paginated inventory APIs. Read the row total from it when it is there,
-    and answer None when it is not -- a total this script invented would be
-    worse than saying the API did not report one."""
+    """The row total Endpoint Central reports for the walk, or None.
+
+    On a real server the paginated inventory APIs carry total/limit/page inside
+    message_response, beside the scancomputers array; some builds put a
+    metadata object alongside message_response instead. Both are read, and
+    None is answered when neither has one -- a total this script invented
+    would be worse than saying the API did not report one."""
     if type(body) != 'dict':
         return None
-    meta = body.get('metadata', {})
-    if type(meta) != 'dict':
-        return None
-    total = meta.get('total', meta.get('total_records'))
-    if type(total) == 'int' and total >= 0:
-        return total
+    for container in (body.get('message_response'), body.get('metadata')):
+        if type(container) != 'dict':
+            continue
+        total = container.get('total', container.get('total_records'))
+        if type(total) == 'int' and total >= 0:
+            return total
+        if type(total) == 'string' and total.isdigit():
+            return int(total)
     return None
 
 def retrieved_of(reported, total):
@@ -116,6 +122,66 @@ def retrieved_of(reported, total):
     if total == None:
         return 'Retrieved {} assets; the API does not report a total'.format(reported)
     return 'Retrieved {}/{} available assets'.format(reported, total)
+
+# Prefixes a token must NOT carry. The credential key is named oauth_token, which
+# invites pasting a bearer-style value, but the on-prem API wants the bare
+# auth_token and answers anything else with status "error".
+TOKEN_PREFIXES = ('bearer ', 'zoho-oauthtoken ')
+
+# How much of an unexpected response body to quote in a log line. Enough to
+# recognise what answered -- an error envelope, a login page's JSON, an empty
+# object -- without pasting a page of inventory into the task log.
+BODY_SAMPLE_CHARS = 600
+
+def check_token_shape(token):
+    """Warn about a token value that the on-prem API is bound to reject."""
+    lowered = token.lower()
+    for prefix in TOKEN_PREFIXES:
+        if lowered.startswith(prefix):
+            print("endpoint-central: WARNING the oauth_token value starts with '{}'. Endpoint Central on-prem expects the bare auth_token from /api/1.4/desktop/authentication with no prefix; remove it from the credential.".format(token[:len(prefix)].strip()))
+            return
+    if not token:
+        print('endpoint-central: WARNING the oauth_token value is empty')
+
+def api_error(body):
+    """The (status, code, description) of a non-success Endpoint Central
+    envelope, or None when the body reports success or carries no status.
+
+    The on-prem API answers an invalid or expired auth token -- and most other
+    request-level failures -- with HTTP 200 and a body of the form
+    {"status":"error","error_code":...,"error_description":...}, with no
+    message_response at all. get_json only reports a non-2xx status as an
+    error, so without this check such a body reads as an inventory with no
+    computers: the task ends with zero assets and no error, which is
+    indistinguishable from a server that manages nothing. That is exactly how
+    a credential problem went undiagnosed in the field, and why the run must
+    fail here with the server's own words instead."""
+    status = body.get('status')
+    if status == None or str(status).lower() == 'success':
+        return None
+    code = body.get('error_code', body.get('errorCode', ''))
+    description = body.get('error_description', body.get('error_message', body.get('message', '')))
+    return (str(status), str(code), str(description))
+
+def describe_body(body):
+    """A bounded JSON rendering of a response body for a log line."""
+    text = encode(body)
+    if len(text) > BODY_SAMPLE_CHARS:
+        text = text[:BODY_SAMPLE_CHARS] + '...'
+    return text
+
+def unexpected_shape(body, page, url):
+    """The failure message for a 2xx body that is not a scancomputers page."""
+    keys = sorted(body.keys()) if type(body) == 'dict' else []
+    note = ''
+    if type(body) == 'list' and not body:
+        # No Endpoint Central build answers with a bare array; the one thing
+        # that does is the generic dummy server behind `runzero script
+        # --validate`, whose fixture does not model this vendor. Say so, so
+        # that failure is read as the tool's limitation and not the script's.
+        note = " (An empty JSON array is what the generic `runzero script --validate` dummy server returns; it does not model Endpoint Central. Validate against a fixture that answers with a scancomputers page instead.)"
+    return ('Endpoint Central answered page {} at {} with a 2xx response that carries no message_response.scancomputers; ' +
+            'the inventory could not be read. Top-level keys: {}. Body: {}').format(page, url, keys, describe_body(body)) + note
 
 def is_millis_timestamp(value):
     """True when value is a 13-digit integer, or a string of 13 digits, which is
@@ -293,10 +359,13 @@ def build_assets(devices, scope):
     return assets
 
 def main(**kwargs):
-    # oauth_token is your auth token.
+    # oauth_token is the on-prem auth token, sent verbatim. Surrounding
+    # whitespace is stripped because a pasted value routinely carries a
+    # trailing newline, and the server rejects the token with it attached.
     base_url = get_url_base(kwargs)
-    token = kwargs['oauth_token']
+    token = str(kwargs['oauth_token'] or '').strip()
     scope = get_string(kwargs, 'server_scope', default='')
+    check_token_shape(token)
     headers = {
         'Authorization': token,
         'Accept':        'application/json',
@@ -307,25 +376,42 @@ def main(**kwargs):
     reported    = 0
     total       = None
     last_signature = None
+    url = base_url + SCAN_ENDPOINT
+    print('endpoint-central: reading {} in pages of {}'.format(url, PAGE_LIMIT))
     p = pager('endpoint-central-computers')
     while p.next():
-        url = base_url + SCAN_ENDPOINT
         params = {"pagelimit": PAGE_LIMIT, "page": page}
         body, err = get_json(url, params=params, timeout=3600, **http_options)
         if err:
             fail('Scan API error:', err)
 
-        body    = body or {}
-        # message_response is documented as an object; reading .get off a list
-        # would abort the script, so an array-shaped error document has to stop
-        # the walk rather than end the run silently.
-        if type(body) != 'dict' or type(body.get('message_response', {})) != 'dict':
-            print('endpoint-central: unexpected response shape, wanted an object')
-            break
-        total   = reported_total(body) if total == None else total
-        msg     = body.get('message_response', {})
-        devices = msg.get('scancomputers', [])
-        if type(devices) != 'list' or not devices:
+        # Every exit below that is not a real page of computers ends the task
+        # in error. Reporting zero assets with exit 0 is indistinguishable from
+        # a server that manages no computers, and an import cut short by a
+        # mid-walk failure must not look complete either.
+        if body == None:
+            fail('Endpoint Central answered page {} at {} with a 2xx response and an empty body; the inventory could not be read.'.format(page, url))
+        if type(body) != 'dict':
+            fail(unexpected_shape(body, page, url))
+        error = api_error(body)
+        if error:
+            fail(('Endpoint Central rejected the request for page {} (HTTP 2xx, status={}, error_code={}, error_description={}). ' +
+                  'An invalid or expired auth token is the usual cause: re-run POST /api/1.4/desktop/authentication, paste the new ' +
+                  'auth_token into the credential with no \'Bearer\' or \'Zoho-oauthtoken\' prefix, and confirm the account has Inventory read access.'
+                  ).format(page, repr(error[0]), repr(error[1]), repr(error[2])))
+        msg = body.get('message_response')
+        if type(msg) != 'dict' or 'scancomputers' not in msg:
+            fail(unexpected_shape(body, page, url))
+        devices = msg.get('scancomputers')
+        if type(devices) != 'list':
+            fail(unexpected_shape(body, page, url))
+
+        total = reported_total(body) if total == None else total
+        print('endpoint-central: page {} returned {} computers (status={}, server total={})'.format(
+            page, len(devices), body.get('status'), total))
+        if not devices:
+            if page == 1:
+                print('endpoint-central: the server reports no scanned computers for this account. If the Endpoint Central console shows managed computers, check that the account behind the token has Inventory read access.')
             break
 
         # A page identical to the one before it means the server stopped
@@ -347,6 +433,7 @@ def main(**kwargs):
             break
         page += 1
 
+    print('endpoint-central: imported {} assets from {} page(s). {}'.format(reported, page, retrieved_of(reported, total)))
     if not reported:
         print('No devices returned')
 
