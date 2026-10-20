@@ -43,7 +43,18 @@ A cloud tenant answers this script with a 401. Endpoint Central **MSP** (API
   built-in roles only Guest has it (Technician and Auditor do not); otherwise
   create a custom role under **Admin → User Administration → Add Role** with
   Inventory read.
-- An on-prem auth token for that account:
+- A credential for the API. Two kinds work, and **the API key is the one to use
+  for a scheduled task**:
+
+  **API key (recommended).** In the Endpoint Central console go to **Admin →
+  Integrations → API Key Management → Generate Key**, choose the service
+  **Custom Integrations**, name it (e.g. `runzero`), grant **Inventory → Read**
+  only, leave **Key Expiry** at *Never Expires* (or set a rotation date you will
+  honour), generate, and copy the key — it is shown once. ManageEngine documents
+  it as passed in the `Authorization` header exactly like the product's other
+  tokens, which is what this script does.
+
+  **Session auth token (fallback).** The older route is a login call:
 
   ```bash
   curl -s -X POST 'https://ec.example.com:8383/api/1.4/desktop/authentication' \
@@ -53,13 +64,24 @@ A cloud tenant answers this script with a 401. Endpoint Central **MSP** (API
 
   Use `"auth_type":"ad_authentication"` plus `"domainName":"<domain>"` for an AD
   account. The token is at `message_response.authentication.auth_data.auth_token`.
-  Confirm it works before touching runZero — note the header is the raw token,
-  with no `Bearer` prefix:
+  **It is a session token:** its lifetime is undocumented and it is invalidated
+  when the same account logs in again, so a recurring task built on it will
+  start failing with `error_code 10002 "Invalid or expired token"` at some point
+  and need a fresh token pasted in by hand. Use it for a one-off test, not a
+  schedule.
+
+  Whichever you use, confirm it works before touching runZero — note the header
+  is the raw value, with no `Bearer` prefix:
 
   ```bash
   curl -s 'https://ec.example.com:8383/api/1.4/inventory/scancomputers?pagelimit=1&page=1' \
     -H 'Authorization: B42550F3-006D-48EB-8011-F6C7D6323EE7' -H 'Accept: application/json'
   ```
+
+  A 200 whose body has `"status":"success"` and a populated
+  `message_response.scancomputers` means both the credential and the role are
+  right. A 200 whose body has `"status":"error"` is a rejection — read
+  `error_description`.
 
 ## Steps
 
@@ -67,9 +89,10 @@ A cloud tenant answers this script with a 401. Endpoint Central **MSP** (API
    **Custom Integration Script Secrets**:
    - **Endpoint Central URL** (`url`) — the server origin including port, e.g.
      `https://ec.example.com:8383`. The script appends the API path itself.
-   - **API auth token (on-prem)** (`oauth_token`) — the `auth_token` above, verbatim.
-     The key is named `oauth_token` only so existing credentials keep working; it
-     is not an OAuth token.
+   - **API key or auth token (on-prem)** (`oauth_token`) — the API key (preferred)
+     or session `auth_token` from above, pasted verbatim with no prefix. The key
+     is named `oauth_token` only so existing credentials keep working; it is not
+     an OAuth token.
    - **Server scope** (`server_scope`, optional) — a label such as `ec-hq`. When set,
      foreign ids become `manage-engine-endpoint-central:<server_scope>:<resource_id>`,
      so two Endpoint Central servers imported into one runZero organization cannot
@@ -189,35 +212,39 @@ and will appear as a new asset until the old one ages out.
 
 ### The task finishes in about a second with 0 assets and no error
 
-Endpoint Central's on-prem API reports an invalid or expired auth token — and
-most other request-level failures — as **HTTP 200** with a body of
+Endpoint Central's on-prem API reports an invalid or expired token — and most
+other request-level failures — as **HTTP 200** with a body of
 
 ```json
-{"status":"error","error_code":1001,"error_description":"...","message_version":"1.0","message_type":"scancomputers"}
+{"status":"error","error_code":10002,"error_description":"Invalid or expired token","message_version":"1.0","message_type":"scancomputers"}
 ```
 
 and no `message_response` at all. The library version of the script checks
 only the HTTP status, so that body read as an inventory with no computers: one
 request, `script: No devices returned`, exit 0, and a task that looked like a
 successful import of an empty estate. That is exactly what a first run with a
-freshly created credential produced in the field.
+freshly created credential produced in the field; re-running with this version
+turned it into the `error_code 10002` message above.
 
 This version checks the body's `status` and **ends the task in error** with the
 server's own `error_code` and `error_description` in the task log, as a red task
 error on the integration page. If you see it:
 
-1. **Check the token value in the credential.** It must be the bare
-   `auth_token` from `POST /api/1.4/desktop/authentication` — no `Bearer` or
+1. **Switch the credential to an API key** if it holds a session `auth_token`.
+   `10002 Invalid or expired token` on a credential that worked before is the
+   session token ageing out or being invalidated by another login on the same
+   account; it will recur on every expiry. Generate a key under **Admin →
+   Integrations → API Key Management** (service *Custom Integrations*,
+   Inventory → Read, never expires) as described under
+   [Requirements](#requirements) and paste it into the credential.
+2. **Check the value in the credential** is bare — no `Bearer` or
    `Zoho-oauthtoken` prefix (the field is named `oauth_token`, which invites
-   one; the script warns in the log when it sees one), and not the key from the
-   console's *API key generation* page. Leading and trailing whitespace from a
-   paste is stripped automatically.
-2. **Check the token still works** with the `curl` under
+   one; the script warns in the log when it sees one). Leading and trailing
+   whitespace from a paste is stripped automatically.
+3. **Check the value still works** with the `curl` under
    [Requirements](#requirements), using the exact value from the credential.
-   The body's `error_description` says why it was rejected. The on-prem token's
-   lifetime is not documented; if it has expired, re-run the authentication
-   call and update the credential.
-3. **Check the account** behind the token has Inventory read access. An
+   The body's `error_description` says why it was rejected.
+4. **Check the account** behind the credential has Inventory read access. An
    account without it can answer with a `status: success` page whose
    `scancomputers` list is empty — the task then succeeds with 0 assets and
    logs `the server reports no scanned computers for this account`.

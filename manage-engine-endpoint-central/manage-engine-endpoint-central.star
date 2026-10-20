@@ -28,10 +28,10 @@ CONFIG = {
             # Central Cloud requires "Authorization: Zoho-oauthtoken" and a
             # full OAuth exchange this script does not perform.
             "key": "oauth_token",
-            "label": "API auth token (on-prem)",
+            "label": "API key or auth token (on-prem)",
             "type": "secret",
             "required": True,
-            "description": "On-premises Endpoint Central auth token, sent verbatim as the Authorization header. Not a Zoho OAuth token; Endpoint Central Cloud is not supported and will answer 401.",
+            "description": "On-premises Endpoint Central API key (Admin > Integrations > API Key Management; recommended, never expires by default) or a /api/1.4/desktop/authentication auth_token (a session token that expires). Sent verbatim as the Authorization header, with no prefix. Not a Zoho OAuth token; Endpoint Central Cloud is not supported and will answer 401.",
         },
         {
             # Endpoint Central's on-prem API exposes no installation or server
@@ -138,7 +138,7 @@ def check_token_shape(token):
     lowered = token.lower()
     for prefix in TOKEN_PREFIXES:
         if lowered.startswith(prefix):
-            print("endpoint-central: WARNING the oauth_token value starts with '{}'. Endpoint Central on-prem expects the bare auth_token from /api/1.4/desktop/authentication with no prefix; remove it from the credential.".format(token[:len(prefix)].strip()))
+            print("endpoint-central: WARNING the oauth_token value starts with '{}'. Endpoint Central on-prem expects the bare API key or auth_token with no prefix; remove it from the credential.".format(token[:len(prefix)].strip()))
             return
     if not token:
         print('endpoint-central: WARNING the oauth_token value is empty')
@@ -396,8 +396,9 @@ def main(**kwargs):
         error = api_error(body)
         if error:
             fail(('Endpoint Central rejected the request for page {} (HTTP 2xx, status={}, error_code={}, error_description={}). ' +
-                  'An invalid or expired auth token is the usual cause: re-run POST /api/1.4/desktop/authentication, paste the new ' +
-                  'auth_token into the credential with no \'Bearer\' or \'Zoho-oauthtoken\' prefix, and confirm the account has Inventory read access.'
+                  'An invalid or expired token is the usual cause. For a scheduled task use an API key: Admin > Integrations > API Key Management, ' +
+                  'service Custom Integrations, Inventory read, never expires. A /api/1.4/desktop/authentication auth_token is a session token and expires. ' +
+                  'Paste the value into the credential with no \'Bearer\' or \'Zoho-oauthtoken\' prefix, and confirm the account has Inventory read access.'
                   ).format(page, repr(error[0]), repr(error[1]), repr(error[2])))
         msg = body.get('message_response')
         if type(msg) != 'dict' or 'scancomputers' not in msg:
