@@ -1,0 +1,11 @@
+# Report output - contains asset data from the customer's runZero organization
+meraki_vlan_report/
+*.jsonl
+
+# Local secrets
+.env
+
+# Python / OS noise
+__pycache__/
+*.pyc
+.DS_Store
