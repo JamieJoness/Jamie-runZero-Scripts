@@ -99,9 +99,9 @@ import requests
 # CONFIGURATION — edit the values below before running
 # ============================================================
 CONSOLE_BASE_URL = "https://console.runzero.com/api/v1.0"   # EU: https://console-eu.runzero.com/api/v1.0
-ACCOUNT_TOKEN    = "CT26F65F91AB01C848A0ECEA06F75E"               # Account API key (CT-…): Account → API keys.
+ACCOUNT_TOKEN    = ""               # Account API key (CT-…): Account → API keys.
                                                               # Or: export RZ_ACCOUNT_TOKEN="CT-…" (takes precedence)
-TARGET_ORG       = "c492b82a-d7b5-4a2e-8cff-383388a04afb"            # existing organisation everything collapses into
+TARGET_ORG       = ""            # existing organisation everything collapses into
 
 # Source organisations. Leave SOURCE_ORGS empty to collapse EVERY other org on
 # the account (child orgs included). Otherwise list names or UUIDs — child orgs
