@@ -99,9 +99,9 @@ import requests
 # CONFIGURATION — edit the values below before running
 # ============================================================
 CONSOLE_BASE_URL = "https://console.runzero.com/api/v1.0"   # EU: https://console-eu.runzero.com/api/v1.0
-ACCOUNT_TOKEN    = ""               # Account API key (CT-…): Account → API keys.
+ACCOUNT_TOKEN    = "RZ_ACCOUNT_TOKEN EXPORT PREFERABLE"               # Account API key (CT-…): Account → API keys.
                                                               # Or: export RZ_ACCOUNT_TOKEN="CT-…" (takes precedence)
-TARGET_ORG       = ""            # existing organisation everything collapses into
+TARGET_ORG       = "ORG NAME OR UUID"            # existing organisation everything collapses into
 
 # Source organisations. Leave SOURCE_ORGS empty to collapse EVERY other org on
 # the account (child orgs included). Otherwise list names or UUIDs — child orgs
@@ -125,7 +125,7 @@ SITE_NAME_TEMPLATE = "{org}"                 # placeholders: {org}, {site}
 PIN_EXPLORERS      = True                    # pin each mapped Explorer to its new site (shared ones stay unpinned)
 MIGRATE_TASKS      = True                    # False = create sites + pin Explorers only
 DRY_RUN            = True                    # True = read-only preview; False = make the changes
-SKIP_CONFIRMATION  = False                   # True = no "type yes" prompt when DRY_RUN is False
+SKIP_CONFIRMATION  = True                   # True = no "type yes" prompt when DRY_RUN is False
 REPORT_FILE        = "collapse_report.json"  # JSON report of everything done / to do by hand
 # ============================================================
 
@@ -149,6 +149,19 @@ LIVE_RECURRING_STATUSES = {"active", "paused", "error"}
 # Frequencies with a time-of-day anchor worth preserving; anything else starts now.
 ANCHORED_FREQUENCIES = {"daily", "weekly", "monthly", "nth_weekday"}
 INVENTORY_KEYWORDS = ("public:", "private:")
+# Scan-task option naming the custom integration the task runs (runzero/custom_integration_params.go).
+CUSTOM_INTEGRATION_ID_KEY = "custom-integration-id"
+# runzero.ProbeDefaultsValue — stored by the console, expanded by the hub at dispatch; the
+# public scan endpoint does not accept it (nor probe names from older runZero versions).
+PROBE_DEFAULTS = "defaults"
+UNKNOWN_PROBE_RE = re.compile(r"unknown probe:\s*([^\s,;]+)", re.I)
+MAX_CREATE_ATTEMPTS = 12
+# Tasks that would otherwise start immediately start this far out, so the follow-up PATCH
+# (probes / params / paused) is in place before the hub can dispatch the first run.
+FIRST_RUN_DELAY_SECONDS = 120
+# Integrations that must run on an Explorer (on-prem sources); their connection settings
+# (URL, base DN, …) are task-level, so otherwise-identical tasks may still differ.
+EXPLORER_ONLY_INTEGRATIONS = {"LDAP", "VMware", "MECM", "Nessus", "Rapid7 Nexpose", "InsightVM", "Tenable Security Center", "NetBox"}
 MARKER_RE = re.compile(r"\[collapse src-task=([0-9a-f-]{36})\]", re.I)
 TIMEOUT_SECONDS = 120
 MAX_RETRIES = 6
@@ -325,7 +338,8 @@ def err_text(resp: requests.Response) -> str:
     try:
         j = resp.json()
         if isinstance(j, dict):
-            return "; ".join(str(j[k]) for k in ("error", "details") if j.get(k)) or resp.text[:200]
+            # The API puts the cause in "detail" (singular); older handlers use "details".
+            return "; ".join(str(j[k]) for k in ("error", "detail", "details") if j.get(k)) or resp.text[:200]
     except ValueError:
         pass
     return resp.text[:200]
@@ -788,19 +802,22 @@ def main() -> int:
         ]
 
     def match_target_explorer(src: Dict) -> Tuple[Optional[Dict], str]:
-        """Source Explorer record → the same machine's record in the target org."""
+        """Source Explorer record → the same machine's record in the target org.
+        Hostname is the key: the Explorer's host id is stored per organisation
+        (<org id>.agentid), so a moved Explorer gets a NEW host id. The host id
+        is only useful as a tie-breaker (or when pinned via RUNZERO_AGENT_HOST_ID)."""
         hid = (src.get("host_id") or "").strip()
-        if hid:
-            by_host = [e for e in tgt_explorers if (e.get("host_id") or "").strip() == hid]
-            if len(by_host) == 1:
-                return by_host[0], "machine id"
-            if len(by_host) > 1:
-                return None, f"ambiguous: {len(by_host)} target explorers share its machine id"
         by_name = find_explorers(tgt_explorers, src.get("name") or "")
         if len(by_name) == 1:
             return by_name[0], "hostname"
         if len(by_name) > 1:
+            by_host = [e for e in by_name if hid and (e.get("host_id") or "").strip() == hid]
+            if len(by_host) == 1:
+                return by_host[0], "hostname + host id"
             return None, f"ambiguous: {len(by_name)} target explorers are named '{src.get('name')}' — use EXPLORER_MAP"
+        by_host = [e for e in tgt_explorers if hid and (e.get("host_id") or "").strip() == hid]
+        if len(by_host) == 1:
+            return by_host[0], "host id"
         return None, "not in target org yet — move it, then re-run"
 
     def describe_site(e: Dict) -> str:
@@ -851,14 +868,53 @@ def main() -> int:
     if untouched:
         print(f"  ℹ target explorers not linked to any source org (left untouched): {', '.join(untouched)}")
 
-    # Desired site per mapped target explorer: pin when it serves exactly one new
-    # site, otherwise unpin (NIL) — pinning would break the other sites' tasks.
+    # Resolve which target explorer each source scan task will run on, before deciding pins.
+    # Order: EXPLORER_MAP override → the same machine that ran the task (Phase 2 match) →
+    # a target explorer with the task's explorer hostname → (only if the task had no explorer
+    # of its own) the org's single moved explorer.
+    src_tasks_by_org: Dict[str, List[Dict]] = {}
+    if MIGRATE_TASKS:
+        for org in sources:
+            src_tasks_by_org[org["id"]] = sorted(
+                (t for t in fetch_scoped(api, "/org/tasks", org["id"], f"tasks of '{org['name']}'",
+                                         params={"search": "type:scan recur:true"})
+                 if t.get("recur") and t.get("status") in LIVE_RECURRING_STATUSES),
+                key=lambda t: norm(t.get("name")))
+
+    def resolve_task_explorer(org: Dict, t: Dict) -> Tuple[Optional[Dict], Optional[str]]:
+        """→ (target explorer or None, note or None). Hosted-zone tasks need no explorer."""
+        e = org_override.get(org["id"])
+        if e:
+            return e, None
+        e = src_to_tgt.get(t.get("agent_id") or "")
+        if e:
+            return e, None
+        agent_name = t.get("agent_name") or ""
+        if agent_name:
+            matches = find_explorers(tgt_explorers, agent_name)
+            if len(matches) == 1:
+                return matches[0], f"explorer matched by hostname '{matches[0].get('name')}'"
+            return None, None
+        # No explorer of its own (explorer group, or the old agent record is gone).
+        if len(org_matched.get(org["id"], [])) == 1:
+            e = org_matched[org["id"]][0]
+            return e, f"task had no explorer of its own — used the org's only moved explorer '{e.get('name')}'"
+        return None, None
+
+    # Desired site per mapped target explorer: pin when every site it will serve is the
+    # same one, otherwise unpin (NIL). Sites come from the orgs whose explorer it was AND
+    # from every task that resolves to it (an explorer can serve tasks in several orgs).
     explorer_sites: Dict[str, Set[str]] = {}
     for org in sources:
         org_sites = {site_map[s["id"]] for s in sites_by_org.get(org["id"], []) if site_map.get(s["id"])}
         served_by = [org_override[org["id"]]] if org["id"] in org_override else org_matched.get(org["id"], [])
         for e in served_by:
             explorer_sites.setdefault(e["id"], set()).update(org_sites)
+        for t in src_tasks_by_org.get(org["id"], []):
+            tgt_site = site_map.get(t.get("site_id") or "")
+            e, _ = resolve_task_explorer(org, t)
+            if e and tgt_site:
+                explorer_sites.setdefault(e["id"], set()).add(tgt_site)
     desired_site: Dict[str, str] = {}
     for eid, sids in explorer_sites.items():
         if len(sids) == 1:
@@ -880,23 +936,19 @@ def main() -> int:
         print(f"  • {label}: {action} — done")
         return True
 
-    if PIN_EXPLORERS and mapped_ids:
+    if PIN_EXPLORERS and explorer_sites:
         print()
-        done: Set[str] = set()
-        for org in sources:
-            served_by = [org_override[org["id"]]] if org["id"] in org_override else org_matched.get(org["id"], [])
-            for e in served_by:
-                if e["id"] in done:
-                    continue
-                done.add(e["id"])
-                want = desired_site.get(e["id"])
-                if want is None:
-                    print(f"  ⚠ {org['name']}: explorer '{e.get('name')}' left as-is (its site was not created)")
-                elif explorer_site(e) != want:
-                    set_explorer_site(e, want, org["name"])
-                else:
-                    print(f"  • {org['name']}: explorer '{e.get('name')}' already "
-                          f"{'unpinned' if want == NIL_UUID else 'pinned to its site'}")
+        tgt_by_id = {e["id"]: e for e in tgt_explorers}
+        for eid in sorted(explorer_sites, key=lambda i: norm(tgt_by_id[i].get("name"))):
+            e = tgt_by_id[eid]
+            want = desired_site.get(eid)
+            if want is None:
+                print(f"  ⚠ explorer '{e.get('name')}' left as-is (its site was not created)")
+            elif explorer_site(e) != want:
+                set_explorer_site(e, want, e.get("name", ""))
+            else:
+                print(f"  • explorer '{e.get('name')}' already "
+                      f"{'unpinned (serves several sites)' if want == NIL_UUID else 'pinned to its site'}")
 
     if not MIGRATE_TASKS:
         print("\n  MIGRATE_TASKS = False: stopping after sites/explorers.")
@@ -924,13 +976,23 @@ def main() -> int:
     }
     all_template_ids = {t["id"] for t in templates}
 
+    # A scan task that runs a custom integration must reference one the TARGET org can
+    # access (custom integrations are org-scoped) — otherwise the scan API rejects the
+    # whole task with "failed to set probes and options". Check up front, in dry run too.
+    tgt_custom = api.get_optional("/org/custom-integrations", oid=target["id"], what="target custom integrations")
+    tgt_custom_ids = {c["id"] for c in tgt_custom if c.get("id")}
+    custom_names: Dict[str, str] = {c["id"]: c.get("name", "") for c in tgt_custom if c.get("id")}
+    for org in sources:
+        for c in api.get_optional("/org/custom-integrations", oid=org["id"], what=f"custom integrations of '{org['name']}'"):
+            if c.get("id"):
+                custom_names.setdefault(c["id"], c.get("name", ""))
+    blocked_custom: Set[str] = set()
+
     created_n = skipped_n = exists_n = creds_n = 0
+    problems: Dict[str, List[str]] = {}   # full-text reason → affected "org / task" labels
     rows = []
     for org in sources:
-        src_tasks = [t for t in fetch_scoped(api, "/org/tasks", org["id"], f"tasks of '{org['name']}'",
-                                             params={"search": "type:scan recur:true"})
-                     if t.get("recur") and t.get("status") in LIVE_RECURRING_STATUSES]
-        src_tasks.sort(key=lambda t: norm(t.get("name")))
+        src_tasks = src_tasks_by_org.get(org["id"], [])
         org_rep = next(r for r in report["organisations"] if r["id"] == org["id"])
         for t in src_tasks:
             name = t.get("name") or "Unnamed scan"
@@ -946,6 +1008,7 @@ def main() -> int:
                 nonlocal skipped_n
                 entry["status"] = f"skipped: {reason}"
                 rows.append([org["name"], name, freq, who, f"✗ {reason}"])
+                problems.setdefault(reason, []).append(label)
                 skipped_n += 1
 
             if not tgt_site_id:
@@ -960,29 +1023,22 @@ def main() -> int:
             if src_status == "error":
                 entry["notes"].append(f"source task was in error state ('{t.get('error') or '?'}') — recreated active")
 
-            # Explorer resolution: EXPLORER_MAP override → the same machine that ran the
-            # source task (matched in Phase 2) → same hostname → the org's only explorer.
+            # Explorer resolution (shared with the pin planning above).
             hosted_zone_id = t.get("hosted_zone_id") or ""
             if hosted_zone_id == NIL_UUID:
                 hosted_zone_id = ""
-            src_agent_id = t.get("agent_id") or ""
             src_agent_name = t.get("agent_name") or ""
-            explorer = org_override.get(org["id"])
-            if not explorer and not hosted_zone_id:
-                explorer = src_to_tgt.get(src_agent_id)
-                if not explorer and src_agent_name:
-                    matches = find_explorers(tgt_explorers, src_agent_name)
-                    if len(matches) == 1:
-                        explorer = matches[0]
-                        entry["notes"].append(f"explorer matched by hostname '{explorer.get('name')}'")
-                if not explorer and len(org_matched.get(org["id"], [])) == 1:
-                    explorer = org_matched[org["id"]][0]
-                    entry["notes"].append(f"source explorer unresolved — used the org's only moved explorer '{explorer.get('name')}'")
+            explorer, note = (None, None) if hosted_zone_id else resolve_task_explorer(org, t)
+            if note:
+                entry["notes"].append(note)
             if t.get("explorer_group_id") and t["explorer_group_id"] != NIL_UUID:
                 entry["notes"].append("source used an explorer group (org-scoped) — a single explorer is used instead")
             if not explorer and not hosted_zone_id:
-                who = f"'{src_agent_name}'" if src_agent_name else "its explorer"
-                skip(f"{who} not found in target org — move it and re-run, or set EXPLORER_MAP for this org")
+                if src_agent_name:
+                    skip(f"its explorer '{src_agent_name}' is not in the target org yet — move it and re-run "
+                         f"(or set EXPLORER_MAP for this org to use a different explorer)")
+                else:
+                    skip("no explorer — the task had none and the org has no (or several) moved explorers; set EXPLORER_MAP")
                 continue
             if explorer and explorer_status(explorer) != "online":
                 skip(f"explorer {explorer_status(explorer)} (API requires online)", explorer.get("name", ""))
@@ -1001,10 +1057,23 @@ def main() -> int:
                 entry["notes"].append("NEEDS CREDENTIALS: scan credentials (SSH/SNMPv3/WMI/…) must be re-selected in the console")
                 creds_n += 1
             if redacted:
-                entry["notes"].append(f"secret parameters reset to defaults (API redacts them): {', '.join(redacted)}")
+                # Every integration probe's secret options are present (as defaults) on every task;
+                # only the ones for probes this task actually runs matter.
+                enabled = {p.strip() for p in (replay.get("probes") or "").split(",") if p.strip()}
+                relevant = [k for k in redacted if k.split("-")[0] in enabled or k.rsplit("-", 1)[0] in enabled]
+                if relevant:
+                    entry["notes"].append(f"secret options of enabled probes reset to defaults (API redacts them): {', '.join(relevant)}")
             if any(k in (replay.get("targets") or "").lower() for k in INVENTORY_KEYWORDS):
                 entry["notes"].append("targets use public:/private: inventory keywords — they expand against the "
                                       "target org's inventory, which is empty until the first scan")
+
+            ci_id = replay.get(CUSTOM_INTEGRATION_ID_KEY, "")
+            if ci_id and ci_id != NIL_UUID and ci_id not in tgt_custom_ids:
+                ci_name = custom_names.get(ci_id) or short(ci_id) + "…"
+                blocked_custom.add(ci_name)
+                skip(f"custom integration '{ci_name}' is not shared with the target org — grant access, then re-run",
+                     (explorer or {}).get("name", "-"))
+                continue
 
             template_id = t.get("template_id") or ""
             if template_id in (NIL_UUID, "None"):
@@ -1015,11 +1084,26 @@ def main() -> int:
                 template_id = ""
 
             start_ts = next_start_time(t, now)
+            if start_ts <= now:
+                # "Run now" tasks start a couple of minutes out so the post-create PATCH
+                # (probes/params/paused) always lands before the hub can dispatch the first run.
+                start_ts = now + FIRST_RUN_DELAY_SECONDS
             if src_status == "paused" and start_ts < now + 900:
                 # Created active then patched to paused: keep the first run safely in the future.
                 start_ts = max(start_ts, now) + period_seconds(freq)
                 entry["notes"].append(f"first run anchored at {fmt_ts(start_ts)} so the task cannot fire before it is paused")
             opts = scan_options(t, replay, explorer["id"] if explorer else "", hosted_zone_id, start_ts, template_id)
+
+            # The scan endpoint validates probe names strictly; the console does not. "defaults" is
+            # a keyword the hub expands at dispatch, and old tasks carry probe names that no longer
+            # exist (the scanner ignores those). Create with what the API accepts, then restore.
+            src_probe_list = [p.strip() for p in (replay.get("probes") or "").split(",") if p.strip()]
+            uses_defaults = any(p.lower() == PROBE_DEFAULTS for p in src_probe_list)
+            send_probes = [p for p in src_probe_list if p.lower() != PROBE_DEFAULTS]
+            if uses_defaults:
+                opts.pop("probes", None)   # omitted → the API stores the same set "defaults" expands to
+            elif send_probes:
+                opts["probes"] = ",".join(send_probes)
             entry.update({"target_site_id": tgt_site_id, "explorer": (explorer or {}).get("name"),
                           "next_run": fmt_ts(start_ts)})
             who = (explorer or {}).get("name") or f"hosted zone {short(hosted_zone_id)}…"
@@ -1032,21 +1116,49 @@ def main() -> int:
                 created_n += 1
                 continue
 
-            resp = api.request("PUT", f"/org/sites/{tgt_site_id}/scan", oid=target["id"], json_body=opts)
-            if resp.status_code >= 400 and "scan-template" in opts and "template" in err_text(resp).lower():
-                entry["notes"].append(f"template link rejected by the API ({err_text(resp)}) — created without it")
-                opts.pop("scan-template")
+            dropped_probes: List[str] = []
+            resp = None
+            for _attempt in range(MAX_CREATE_ATTEMPTS):
                 resp = api.request("PUT", f"/org/sites/{tgt_site_id}/scan", oid=target["id"], json_body=opts)
-            if resp.status_code >= 400:
-                entry["status"] = f"failed: {err_text(resp)}"
-                rows.append([org["name"], name, freq, who, f"✗ {err_text(resp)}"])
+                if resp.status_code < 400:
+                    break
+                text = err_text(resp)
+                m = UNKNOWN_PROBE_RE.search(text)
+                if m and opts.get("probes"):
+                    bad = m.group(1)
+                    remaining = [p for p in opts["probes"].split(",") if p.strip() and p.strip().lower() != bad.lower()]
+                    dropped_probes.append(bad)
+                    if not remaining:
+                        break
+                    opts["probes"] = ",".join(remaining)
+                    continue
+                if "scan-template" in opts and "template" in text.lower():
+                    entry["notes"].append(f"template link rejected by the API ({text}) — created without it")
+                    opts.pop("scan-template")
+                    continue
+                break
+            if resp is None or resp.status_code >= 400:
+                text = err_text(resp) if resp is not None else "no response"
+                if dropped_probes and not opts.get("probes"):
+                    text = f"every probe on this task is unknown to the API ({', '.join(dropped_probes)})"
+                reason = f"API rejected the task: {text}"
+                entry["status"] = f"failed: {text}"
+                rows.append([org["name"], name, freq, who, f"✗ {reason}"])
+                problems.setdefault(reason, []).append(label)
                 skipped_n += 1
                 continue
+            if dropped_probes:
+                entry["notes"].append(f"legacy probe names dropped (no longer exist in runZero; the scanner already "
+                                      f"ignored them): {', '.join(dropped_probes)}")
             created = resp.json()
             entry["target_task_id"] = created.get("id")
 
             patch: Dict[str, Any] = {}
             diff = params_diff(replay, created)
+            if uses_defaults:
+                # Store the keyword, not the expanded list, so the task tracks future default changes.
+                kept = [p for p in src_probe_list if p.lower() not in {d.lower() for d in dropped_probes}]
+                diff["probes"] = ",".join(kept)
             if diff:
                 patch["params"] = diff
             if src_status == "paused":
@@ -1057,8 +1169,11 @@ def main() -> int:
                     entry["notes"].append(f"post-create patch failed ({', '.join(patch)}): {err_text(presp)}"
                                           + (" — PAUSE THIS TASK BY HAND" if "status" in patch else ""))
                 else:
-                    if diff:
-                        entry["notes"].append(f"restored params via PATCH: {', '.join(sorted(diff))}")
+                    if uses_defaults:
+                        entry["notes"].append("probes restored to the 'defaults' keyword to match the source")
+                    rest = sorted(k for k in diff if k != "probes" or not uses_defaults)
+                    if rest:
+                        entry["notes"].append(f"restored params via PATCH: {', '.join(rest)}")
                     if "status" in patch:
                         entry["notes"].append("recreated as PAUSED to match source")
             migrated_src_ids.add(t["id"].lower())
@@ -1068,11 +1183,24 @@ def main() -> int:
             created_n += 1
 
     table(rows, ["Source org", "Task", "Frequency", "Explorer", "Result"])
+    if problems:
+        print("\n  Skipped / failed — full reasons:")
+        for reason, labels in sorted(problems.items(), key=lambda kv: -len(kv[1])):
+            print(f"    {len(labels)} × {reason}")
+            for lab in labels[:6]:
+                print(f"        - {lab}")
+            if len(labels) > 6:
+                print(f"        … and {len(labels) - 6} more (see {REPORT_FILE})")
     verb = "created" if APPLY else "would be created"
     print(f"\n  ✓ {created_n} task(s) {verb}, {exists_n} already present, {skipped_n} skipped/failed.")
     if creds_n:
         print(f"  ⚠ {creds_n} task(s) used scan credentials — re-select them in the console "
               f"(Tasks → edit → Credentials). The API never exposes or accepts them.")
+    if blocked_custom:
+        print(f"  ⚠ Tasks were skipped because these custom integrations are not shared with '{target['name']}': "
+              f"{', '.join(sorted(blocked_custom))}.")
+        print(f"    Console → Account → Custom Integrations → open each → Organization access → add '{target['name']}', "
+              f"then run this script again (only the missing tasks will be created).")
 
     # ── 4. Integration task checklist ──
     heading("Phase 4: Integration (connector) tasks — manual checklist")
@@ -1110,6 +1238,29 @@ def main() -> int:
         table(rows, ["Source org", "Task", "Integration", "Credential", "Frequency", "Recreate in site"])
         print("\n  These must be recreated in the console (Tasks → Integrations) inside the target org;")
         print("  the public API has no endpoint for creating connector tasks.")
+
+        # In one flat org the same integration + credential only needs ONE task, not one per
+        # former org. Group them so the manual work is sized correctly.
+        groups: Dict[Tuple[str, str], List[Dict]] = {}
+        for it in report["integration_tasks"]:
+            groups.setdefault((it["integration"], it["credential"]), []).append(it)
+        print(f"\n  Consolidated: {len(groups)} task(s) to recreate (one per integration + credential), "
+              f"replacing {len(rows)} per-org copies:")
+        consolidated = []
+        for (integ, cred), items in sorted(groups.items()):
+            freqs = sorted({i["frequency"] or "" for i in items})
+            active = sum(1 for i in items if i["status"] == "active")
+            runs_on_explorer = integ in EXPLORER_ONLY_INTEGRATIONS
+            print(f"    • {integ} with credential '{cred}' — replaces {len(items)} task(s) "
+                  f"({active} active, {len(items) - active} paused); schedule(s): {', '.join(freqs)}")
+            if runs_on_explorer:
+                print(f"        needs an Explorer in the target that can reach the source; check whether the "
+                      f"{len(items)} originals used different connection settings (e.g. LDAP URL / base DN) — "
+                      f"if so, one task per distinct setting")
+            consolidated.append({"integration": integ, "credential": cred, "replaces": len(items),
+                                 "active": active, "schedules": freqs, "source_orgs": sorted({i["source_org"] for i in items})})
+        report["integration_tasks_consolidated"] = consolidated
+
         if cred_rows:
             print("\n  Credential access from the target organisation:")
             table(list(cred_rows.values()), ["Credential", "Type", "Target org access"])
