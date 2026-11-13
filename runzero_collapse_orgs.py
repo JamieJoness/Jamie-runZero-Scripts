@@ -13,10 +13,12 @@ SAME console into a single TARGET organisation. For every source org it:
                  carries over the source site's registered subnets (CIDR +
                  tags/description), scope and excludes. If an org unexpectedly
                  has several sites, each becomes "<org> - <site>".
-  2. EXPLORERS   Resolves the Explorer you moved from that org into the target
-                 (via EXPLORER_MAP below) and, by default, pins it to the new
-                 site. An Explorer shared by several orgs/sites is left
-                 unpinned (= usable by any site) instead.
+  2. EXPLORERS   Works out which Explorer belonged to each source org and finds
+                 the same machine in the target org (you move Explorers in the
+                 console; this matches them by machine id, then hostname — no
+                 manual mapping needed). By default pins each Explorer to its
+                 new site; one shared by several orgs/sites is left unpinned
+                 (= usable by any site) instead.
   3. SCAN TASKS  Recreates the org's recurring scan tasks against the new site
                  using that Explorer — preserving name, description, probes,
                  ports, rate and every other parameter, frequency, next run
@@ -47,12 +49,12 @@ WHAT YOU DO
   1. Create (or choose) the target organisation in the console.
   2. Move each Explorer from its old org into the target org in the console
      (Explorers → select → Reassign to organisation). The public API cannot
-     move Explorers between organisations. Note the reassign is a reinstall:
-     the Explorer re-registers under the target with a NEW id, so map it by
-     NAME below.
+     move Explorers between organisations. The reassign is a reinstall: the
+     Explorer re-registers under the target as a new record with the same
+     machine id and hostname — which is what this script matches on.
   3. Fill in the CONFIGURATION block: console URL, Account API key (or export
-     RZ_ACCOUNT_TOKEN so the key never lands in the file), the target org, and
-     EXPLORER_MAP — source org name → Explorer name as shown in the target org.
+     RZ_ACCOUNT_TOKEN so the key never lands in the file) and the target org.
+     EXPLORER_MAP can stay empty unless you want to force a particular Explorer.
   4. Run with DRY_RUN = True first (default — nothing is written):
          python3 runzero_collapse_orgs.py
   5. Set DRY_RUN = False and run again to perform the changes.
@@ -61,8 +63,8 @@ WHAT YOU DO
      This script never touches them.
 
   Sites can be created before the Explorers are moved: tasks for an org whose
-  Explorer isn't resolvable (or is offline) are skipped with a clear message —
-  run again once the Explorers are in place.
+  Explorer isn't in the target yet (or is offline) are skipped with a clear
+  message — run again once the Explorers are in place.
 
 KNOWN LIMITS OF THE PUBLIC API (handled by flagging, not silently)
 -----------------------------------------------------------------
@@ -97,9 +99,9 @@ import requests
 # CONFIGURATION — edit the values below before running
 # ============================================================
 CONSOLE_BASE_URL = "https://console.runzero.com/api/v1.0"   # EU: https://console-eu.runzero.com/api/v1.0
-ACCOUNT_TOKEN    = "PASTE_ACCOUNT_API_KEY_HERE"               # Account API key (CT-…): Account → API keys.
+ACCOUNT_TOKEN    = "CT26F65F91AB01C848A0ECEA06F75E"               # Account API key (CT-…): Account → API keys.
                                                               # Or: export RZ_ACCOUNT_TOKEN="CT-…" (takes precedence)
-TARGET_ORG       = "PASTE_TARGET_ORG_NAME_OR_UUID"            # existing organisation everything collapses into
+TARGET_ORG       = "c492b82a-d7b5-4a2e-8cff-383388a04afb"            # existing organisation everything collapses into
 
 # Source organisations. Leave SOURCE_ORGS empty to collapse EVERY other org on
 # the account (child orgs included). Otherwise list names or UUIDs — child orgs
@@ -107,17 +109,16 @@ TARGET_ORG       = "PASTE_TARGET_ORG_NAME_OR_UUID"            # existing organis
 SOURCE_ORGS: List[str] = []
 EXCLUDE_ORGS: List[str] = []
 INCLUDE_CHILD_ORGS   = True
-INCLUDE_PROJECT_ORGS = False      # project (temporary) orgs are skipped unless True
+INCLUDE_PROJECT_ORGS = True      # project (temporary) orgs are skipped unless True
 
-# Explorer mapping — source org name (or UUID) → Explorer name (or UUID) as it
-# appears in the TARGET org after you moved it. Child orgs are keyed by their
-# own name (use the UUID if two orgs share a name). Orgs without an entry fall
-# back to an Explorer in the target with the same name as the one the source
-# task used; if that fails their tasks are skipped (sites are still created).
+# Explorer mapping is AUTOMATIC: each source org's Explorers are matched to the
+# ones you moved into the target org by machine id, then by hostname. Normally
+# leave this empty. Use it only to FORCE an Explorer for an org — e.g. you
+# installed a brand-new Explorer in the target instead of moving the old one.
+# Key: source org name (or UUID; child orgs by their own name).
+# Value: Explorer name (or UUID) as shown in the TARGET org.
 EXPLORER_MAP: Dict[str, str] = {
-    # "Acme Retail":    "RETAIL-RZ-01",
-    # "Warehouse":      "WH-RZ-01",
-    # "Acme Logistics": "LOG-RZ-01",
+    # "Acme Retail": "NEW-RETAIL-RZ-01",
 }
 
 SITE_NAME_TEMPLATE = "{org}"                 # placeholders: {org}, {site}
@@ -720,7 +721,7 @@ def main() -> int:
 
     target_sites = [s for s in fetch_scoped(api, "/org/sites", target["id"], "target sites") if not s.get("inactive")]
     tgt_by_name: Dict[str, Dict] = {norm(s["name"]): s for s in target_sites}
-    site_map: Dict[str, str] = {}            # source site id → target site id ("DRY_RUN" in dry run)
+    site_map: Dict[str, str] = {}            # source site id → target site id (planned placeholder in dry run)
     target_site_names: Dict[str, str] = {s["id"]: s["name"] for s in target_sites}   # target site id → name
     rows = []
     for org in sources:
@@ -761,7 +762,9 @@ def main() -> int:
                     if resp.status_code == 403 and "licensed" in err_text(resp).lower():
                         status += " → the account lacks the create_sites entitlement; ask runZero support to enable it"
             else:
-                site_map[site["id"]] = "DRY_RUN"
+                # Distinct placeholder per planned site so dry-run pin/unpin decisions match apply.
+                site_map[site["id"]] = f"DRY_RUN:{site['id']}"
+                target_site_names[site_map[site["id"]]] = name
                 status = "would create"
             rows.append([org["name"], site["name"], name, str(subnet_n), status])
             org_rep["sites"].append({"source_site_id": site["id"], "source_site_name": site["name"],
@@ -774,50 +777,99 @@ def main() -> int:
     tgt_explorers = [e for e in fetch_scoped(api, "/org/explorers", target["id"], "target explorers")
                      if not e.get("inactive")]
     print(f"  Explorers currently in target org: {len(tgt_explorers)}")
-    org_explorer: Dict[str, Dict] = {}     # source org id → explorer (in target) from EXPLORER_MAP
+
+    # Each source org's own Explorer records stay listed (offline) after the move; the
+    # moved Explorer re-registers in the target with the same machine id and hostname.
+    src_explorers_by_org: Dict[str, List[Dict]] = {}
+    for org in sources:
+        src_explorers_by_org[org["id"]] = [
+            e for e in fetch_scoped(api, "/org/explorers", org["id"], f"explorers of '{org['name']}'")
+            if not e.get("inactive")
+        ]
+
+    def match_target_explorer(src: Dict) -> Tuple[Optional[Dict], str]:
+        """Source Explorer record → the same machine's record in the target org."""
+        hid = (src.get("host_id") or "").strip()
+        if hid:
+            by_host = [e for e in tgt_explorers if (e.get("host_id") or "").strip() == hid]
+            if len(by_host) == 1:
+                return by_host[0], "machine id"
+            if len(by_host) > 1:
+                return None, f"ambiguous: {len(by_host)} target explorers share its machine id"
+        by_name = find_explorers(tgt_explorers, src.get("name") or "")
+        if len(by_name) == 1:
+            return by_name[0], "hostname"
+        if len(by_name) > 1:
+            return None, f"ambiguous: {len(by_name)} target explorers are named '{src.get('name')}' — use EXPLORER_MAP"
+        return None, "not in target org yet — move it, then re-run"
+
+    def describe_site(e: Dict) -> str:
+        pinned = explorer_site(e)
+        return "unpinned (any site)" if pinned == NIL_UUID else f"pinned to '{target_site_names.get(pinned, short(pinned) + '…')}'"
+
+    org_override: Dict[str, Dict] = {}     # source org id → target explorer forced via EXPLORER_MAP
+    src_to_tgt: Dict[str, Dict] = {}       # source explorer id → matching target explorer
+    org_matched: Dict[str, List[Dict]] = {}  # source org id → distinct target explorers matched from its records
     rows = []
     for org in sources:
-        ident = explorer_map.get(norm(org["id"])) or explorer_map.get(norm(org["name"]))
-        if not ident:
-            rows.append([org["name"], "-", "-", "no mapping — tasks fall back to same-named explorer"])
+        org_rep = next(r for r in report["organisations"] if r["id"] == org["id"])
+        override = explorer_map.get(norm(org["id"])) or explorer_map.get(norm(org["name"]))
+        if override:
+            matches = find_explorers(tgt_explorers, override)
+            if len(matches) == 1:
+                org_override[org["id"]] = matches[0]
+                rows.append([org["name"], f"(EXPLORER_MAP: {override})", matches[0].get("name", ""), "override",
+                             explorer_status(matches[0]), describe_site(matches[0])])
+                org_rep["explorers"] = [{"override": override, "target_explorer": matches[0].get("name"),
+                                         "target_explorer_id": matches[0]["id"]}]
+            else:
+                why = "not found in target org" if not matches else f"ambiguous ({len(matches)} matches) — use its UUID"
+                rows.append([org["name"], f"(EXPLORER_MAP: {override})", "-", f"✗ {why}", "-", "-"])
+                org_rep["explorers"] = [{"override": override, "error": why}]
             continue
-        matches = find_explorers(tgt_explorers, ident)
-        if not matches:
-            rows.append([org["name"], ident, "-", "✗ not found in target org — moved yet?"])
+        recs = src_explorers_by_org[org["id"]]
+        if not recs:
+            rows.append([org["name"], "-", "-", "no explorers in source org", "-", "-"])
+            org_rep["explorers"] = []
             continue
-        if len(matches) > 1:
-            rows.append([org["name"], ident, "-", f"✗ ambiguous: {len(matches)} explorers share this name — use its UUID"])
-            continue
-        e = matches[0]
-        org_explorer[org["id"]] = e
-        pinned = explorer_site(e)
-        rows.append([org["name"], e.get("name", ""), explorer_status(e),
-                     "unpinned (any site)" if pinned == NIL_UUID
-                     else f"pinned to '{target_site_names.get(pinned, short(pinned) + '…')}'"])
-    table(rows, ["Source org", "Explorer", "State", "Current site"])
-    mapped_ids = {e["id"] for e in org_explorer.values()}
-    unmapped_remote = [e["name"] for e in tgt_explorers if e["id"] not in mapped_ids]
-    if unmapped_remote:
-        print(f"  ℹ target explorers not referenced by EXPLORER_MAP: {', '.join(unmapped_remote)}")
+        org_rep["explorers"] = []
+        for src in sorted(recs, key=lambda x: norm(x.get("name"))):
+            e, how = match_target_explorer(src)
+            if e:
+                src_to_tgt[src["id"]] = e
+                if all(x["id"] != e["id"] for x in org_matched.setdefault(org["id"], [])):
+                    org_matched[org["id"]].append(e)
+                rows.append([org["name"], src.get("name", ""), e.get("name", ""), how, explorer_status(e), describe_site(e)])
+            else:
+                rows.append([org["name"], src.get("name", ""), "-", f"✗ {how}", "-", "-"])
+            org_rep["explorers"].append({"source_explorer": src.get("name"), "source_explorer_id": src["id"],
+                                         "target_explorer": (e or {}).get("name"), "target_explorer_id": (e or {}).get("id"),
+                                         "matched_by": how if e else None, "error": None if e else how})
+    table(rows, ["Source org", "Source explorer", "Target explorer", "Matched by", "State", "Current site"])
+    mapped_ids = {e["id"] for e in src_to_tgt.values()} | {e["id"] for e in org_override.values()}
+    untouched = [e["name"] for e in tgt_explorers if e["id"] not in mapped_ids]
+    if untouched:
+        print(f"  ℹ target explorers not linked to any source org (left untouched): {', '.join(untouched)}")
 
-    # Desired site per mapped explorer: its org's single new site, or unpinned
-    # (NIL) when it serves several orgs or sites — pinning would break the others.
-    explorer_orgs: Dict[str, List[str]] = {}
-    for org_id, e in org_explorer.items():
-        explorer_orgs.setdefault(e["id"], []).append(org_id)
+    # Desired site per mapped target explorer: pin when it serves exactly one new
+    # site, otherwise unpin (NIL) — pinning would break the other sites' tasks.
+    explorer_sites: Dict[str, Set[str]] = {}
+    for org in sources:
+        org_sites = {site_map[s["id"]] for s in sites_by_org.get(org["id"], []) if site_map.get(s["id"])}
+        served_by = [org_override[org["id"]]] if org["id"] in org_override else org_matched.get(org["id"], [])
+        for e in served_by:
+            explorer_sites.setdefault(e["id"], set()).update(org_sites)
     desired_site: Dict[str, str] = {}
-    for eid, org_ids in explorer_orgs.items():
-        if len(org_ids) == 1 and len(sites_by_org.get(org_ids[0], [])) == 1:
-            tgt = site_map.get(sites_by_org[org_ids[0]][0]["id"])
-            if tgt:
-                desired_site[eid] = tgt
-        else:
+    for eid, sids in explorer_sites.items():
+        if len(sids) == 1:
+            desired_site[eid] = next(iter(sids))
+        elif sids:
             desired_site[eid] = NIL_UUID
 
     def set_explorer_site(e: Dict, site_id: str, label: str) -> bool:
         action = (f"unpin explorer '{e.get('name')}' (serves several sites)" if site_id == NIL_UUID
                   else f"pin explorer '{e.get('name')}' to '{target_site_names.get(site_id, 'the new site')}'")
-        if not APPLY or site_id == "DRY_RUN":
+        if not APPLY or site_id.startswith("DRY_RUN"):
             print(f"  • {label}: would {action}")
             return True
         resp = api.request("PATCH", f"/org/explorers/{e['id']}", oid=target["id"], json_body={"site_id": site_id})
@@ -828,22 +880,23 @@ def main() -> int:
         print(f"  • {label}: {action} — done")
         return True
 
-    if PIN_EXPLORERS and org_explorer:
+    if PIN_EXPLORERS and mapped_ids:
         print()
         done: Set[str] = set()
         for org in sources:
-            e = org_explorer.get(org["id"])
-            if not e or e["id"] in done:
-                continue
-            done.add(e["id"])
-            want = desired_site.get(e["id"])
-            if want is None:
-                print(f"  ⚠ {org['name']}: explorer '{e.get('name')}' left as-is (its site was not created)")
-            elif explorer_site(e) != want:
-                set_explorer_site(e, want, org["name"])
-            else:
-                print(f"  • {org['name']}: explorer '{e.get('name')}' already "
-                      f"{'unpinned' if want == NIL_UUID else 'pinned to its site'}")
+            served_by = [org_override[org["id"]]] if org["id"] in org_override else org_matched.get(org["id"], [])
+            for e in served_by:
+                if e["id"] in done:
+                    continue
+                done.add(e["id"])
+                want = desired_site.get(e["id"])
+                if want is None:
+                    print(f"  ⚠ {org['name']}: explorer '{e.get('name')}' left as-is (its site was not created)")
+                elif explorer_site(e) != want:
+                    set_explorer_site(e, want, org["name"])
+                else:
+                    print(f"  • {org['name']}: explorer '{e.get('name')}' already "
+                          f"{'unpinned' if want == NIL_UUID else 'pinned to its site'}")
 
     if not MIGRATE_TASKS:
         print("\n  MIGRATE_TASKS = False: stopping after sites/explorers.")
@@ -907,20 +960,29 @@ def main() -> int:
             if src_status == "error":
                 entry["notes"].append(f"source task was in error state ('{t.get('error') or '?'}') — recreated active")
 
-            # Explorer: EXPLORER_MAP → an explorer in the target with the source task's explorer name.
+            # Explorer resolution: EXPLORER_MAP override → the same machine that ran the
+            # source task (matched in Phase 2) → same hostname → the org's only explorer.
             hosted_zone_id = t.get("hosted_zone_id") or ""
             if hosted_zone_id == NIL_UUID:
                 hosted_zone_id = ""
-            explorer = org_explorer.get(org["id"])
+            src_agent_id = t.get("agent_id") or ""
+            src_agent_name = t.get("agent_name") or ""
+            explorer = org_override.get(org["id"])
             if not explorer and not hosted_zone_id:
-                matches = find_explorers(tgt_explorers, t.get("agent_name") or "")
-                if len(matches) == 1:
-                    explorer = matches[0]
-                    entry["notes"].append(f"explorer matched by name '{explorer.get('name')}' (not in EXPLORER_MAP)")
+                explorer = src_to_tgt.get(src_agent_id)
+                if not explorer and src_agent_name:
+                    matches = find_explorers(tgt_explorers, src_agent_name)
+                    if len(matches) == 1:
+                        explorer = matches[0]
+                        entry["notes"].append(f"explorer matched by hostname '{explorer.get('name')}'")
+                if not explorer and len(org_matched.get(org["id"], [])) == 1:
+                    explorer = org_matched[org["id"]][0]
+                    entry["notes"].append(f"source explorer unresolved — used the org's only moved explorer '{explorer.get('name')}'")
             if t.get("explorer_group_id") and t["explorer_group_id"] != NIL_UUID:
-                entry["notes"].append("source used an explorer group (org-scoped) — mapped explorer used instead")
+                entry["notes"].append("source used an explorer group (org-scoped) — a single explorer is used instead")
             if not explorer and not hosted_zone_id:
-                skip("no explorer — add this org to EXPLORER_MAP")
+                who = f"'{src_agent_name}'" if src_agent_name else "its explorer"
+                skip(f"{who} not found in target org — move it and re-run, or set EXPLORER_MAP for this org")
                 continue
             if explorer and explorer_status(explorer) != "online":
                 skip(f"explorer {explorer_status(explorer)} (API requires online)", explorer.get("name", ""))
