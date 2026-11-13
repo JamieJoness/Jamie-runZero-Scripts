@@ -30,6 +30,10 @@ both the console and a rotating friendly log file with full error tracebacks.
      (Console -> Organization -> Settings -> Generate Organization API Key):
         - SaaS source org      -> paste into SOURCE_TOKEN
         - Self-hosted target   -> paste into TARGET_TOKEN
+     Prefer NOT to store the keys in this file: export them instead as
+     RUNZERO_SOURCE_TOKEN / RUNZERO_TARGET_TOKEN (and optionally
+     RUNZERO_SOURCE_BASE_URL / RUNZERO_TARGET_BASE_URL). Environment
+     variables override the values set below.
 
   2. Set SOURCE_BASE_URL / TARGET_BASE_URL to the two consoles.
 
@@ -39,9 +43,10 @@ both the console and a rotating friendly log file with full error tracebacks.
   4. (Recommended) Run once with DRY_RUN = True to preview what would sync,
      then set DRY_RUN = False to perform the import.
 
-  5. Schedule it (cron / Task Scheduler / systemd timer). Running it at least
-     as often as HOURS_BACK keeps the two consoles in step; the state file
-     means overlapping windows are safe and never double-import.
+  5. Schedule it (cron / Task Scheduler / systemd timer). Run it MORE often
+     than HOURS_BACK (e.g. hourly with a 24h window) so a missed run does not
+     leave a gap; the state file means overlapping windows are safe and never
+     double-import.
 
 Requires:  Python 3.8+ and the `requests` library  (pip install requests)
 ================================================================================
@@ -93,6 +98,12 @@ LOG_LEVEL       = "INFO"                                 # DEBUG, INFO, WARNING,
 # ==============================================================================
 # End of configuration. You should not need to edit below this line.
 # ==============================================================================
+
+# Environment variables override the values above so API keys can be kept out of this file.
+SOURCE_BASE_URL = os.environ.get("RUNZERO_SOURCE_BASE_URL", SOURCE_BASE_URL).rstrip("/")
+SOURCE_TOKEN    = os.environ.get("RUNZERO_SOURCE_TOKEN", SOURCE_TOKEN)
+TARGET_BASE_URL = os.environ.get("RUNZERO_TARGET_BASE_URL", TARGET_BASE_URL).rstrip("/")
+TARGET_TOKEN    = os.environ.get("RUNZERO_TARGET_TOKEN", TARGET_TOKEN)
 
 TIMEOUT_SECONDS = 180
 MAX_RETRIES     = 6
@@ -362,7 +373,9 @@ def download_scan_data(session: requests.Session, base_url: str, task_id: str, o
         raise ValueError(f"Could not resolve a download URL for task {task_id} (HTTP {resp.status_code}).")
 
     filename = _derive_filename(download_url, task_id)
-    dl = requests.get(download_url, stream=True, timeout=TIMEOUT_SECONDS, verify=VERIFY_TLS)
+    # The pre-signed URL belongs to the SaaS side, whose TLS is always verified;
+    # VERIFY_TLS only ever applies to the self-hosted target.
+    dl = requests.get(download_url, stream=True, timeout=TIMEOUT_SECONDS, verify=True)
     dl.raise_for_status()
     return dl.content, filename
 
